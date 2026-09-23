@@ -133,7 +133,9 @@ chore: update gitignore for TensorRT engines
 
 - 厂商 `~/ros2_ws` 与 `~/third_party` 只读使用，作为系统 SDK
 - **任何运动测试必须保留急停、限速和人工看护**
-- 根分区当前 **96% 已用（仅剩 3.0G）**，部署大文件前必须先确认可安全清理或扩容
+- 根分区已于 2026-09-23 在线扩容至 **116G（可用 55G，52%）**；磁盘另有约 **119G 未纳入 GPT**，解锁需改 GPT 几何（高风险，先备份并保留 p1 的 PARTUUID）
+- 空间再度紧张时按 `docs/DECISIONS.md` D-014 的顺序处理：**先侦察分区布局 → 扩容 → 只回收可再生缓存**；`/opt/ota_package`（引导链 OTA 载荷）、`~/.ollama/models`、`/swapfile` 不得当缓存删
+- 内存仅 **7.4Gi（8GB 版 Orin）**，并发预算按此设计
 - 只有 `docs/PROJECT_STATUS.md` 接口清单中标记为"通过"的能力，才允许封装为 Skill
 - `Safety > Control > Skill > Agent` —— Safety Runtime 具有最终否决权
 
