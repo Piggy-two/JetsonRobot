@@ -78,6 +78,8 @@ sudo resize2fs /dev/nvme0n1p1                             # 在线扩展 ext4
 - 未改动厂商 `~/ros2_ws`、`~/third_party`、`~/large_models`
 - GPT 备份留档在 `/root/gpt-nvme0n1-2026-09-23.{bin,txt}`
 
+**附带确认**：本次会话中 `git push` **实测成功**（`ac3b350..1a102ba main -> main`），说明 `~/.ssh/config` 的 `ssh.github.com:443` 与 GitHub 公钥注册均已生效 —— 上一个条目中"`git push` 尚未验证成功"的遗留问题就此关闭。
+
 ---
 
 ## 2026-09-23 — 建立工程维护机制与项目文档结构

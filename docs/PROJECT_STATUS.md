@@ -42,6 +42,7 @@
 | Git 仓库与远程连接 | `origin` = `git@github.com:Piggy-two/JetsonRobot.git`，SSH over 443 已配置 | 2026-09-23 |
 | 工程维护机制 | `README.md` / `CLAUDE.md` / `docs/` 四份长期文档 / `.gitignore` | 2026-09-23 |
 | 磁盘阻塞解除 | 根分区**在线扩容 65G → 116G**（保留 PARTUUID，未改引导配置、未重启）+ 清理可再生缓存 2.35G；可用 2.9G → 55G | 2026-09-23 |
+| GitHub Push 打通 | `git push` 实测成功（`ac3b350..1a102ba`），SSH over 443 + 公钥注册均已生效 | 2026-09-23 |
 
 ---
 
@@ -56,8 +57,8 @@
 | # | 问题 | 影响 | 处理 |
 |---|---|---|---|
 | 1 | ~~根分区仅剩 3.0G（96% 已用）~~ **已解决** | ✅ 已解除 | 2026-09-23 在线扩容至 116G（可用 55G，52%），PARTUUID 保留；详见 `DEVELOPMENT_LOG.md`。剩余 ~119G 未纳入 GPT，**非阻塞** |
-| 2 | **GitHub SSH 22 端口被网络封锁** | 🟡 已规避 | 已在 `~/.ssh/config` 配置走 `ssh.github.com:443`；SSH 公钥仍需注册到 GitHub 账号才能 push |
-| 3 | **SSH 公钥未注册到 GitHub** | 🟡 待用户操作 | 公钥 `~/.ssh/id_ed25519.pub`（尾 `...eLXLE`）需加到 GitHub → Settings → SSH keys |
+| 2 | **GitHub SSH 22 端口被网络封锁** | ✅ 已规避 | 已在 `~/.ssh/config` 配置走 `ssh.github.com:443`，实测可用 |
+| 3 | ~~SSH 公钥未注册到 GitHub~~ **已解决** | ✅ 已解除 | 2026-09-23 实测 `git push` 成功（`ac3b350..1a102ba`） |
 | 4 | **LiDAR 驱动型号未确认** | 🟡 待验收 | 候选：`ydlidar_ros2_driver` / `sllidar_ros2` / `sclidar_ros2` / `ldlidar_stl_ros2` / `Aurora930`。必须以实机 launch 与 ROS graph 为准 |
 | 5 | **仓库尚无代码** | ⬜ 非缺陷 | 按 Phase 顺序引入，不要提前创建空模块 |
 | 6 | 厂商栈加载顺序未记录 | 🟡 待补 | 需记录 `ROS_DISTRO` / `AMENT_PREFIX_PATH` / `PYTHONPATH` 与启动脚本来源 |
@@ -71,16 +72,15 @@
 
 **优先级从高到低：**
 
-1. **完成 SSH 公钥注册** —— 使 `git push` 可用（`~/.ssh/id_ed25519.pub`，尾 `...eLXLE`）。
-2. **执行 Phase 0 基线检查** —— `jtop` / `tegrastats` / `df -h /` / `ros2 node|topic|service|action list`，并记录厂商环境加载顺序。
-3. **底盘与安全验收** —— 在车轮悬空或留安全距离条件下测试 `stop()`、低速前进/后退/平移/原地旋转；验证速度上限、命令超时、通信中断停车、遥控优先级；记录坐标系、麦轮运动学约定、`cmd_vel` 类型与单位。
-4. **LiDAR 验收** —— 确认型号、设备路径、波特率（新增线索：syslog 中 `aurora930_node` 反复等设备插入）；验证 `LaserScan` 频率/角度/量程/frame_id 与 TF。
-5. **相机验收** —— Orbbec RGB/Depth/CameraInfo/TF；`cv_bridge` 收图最小验证。
-6. **语音验收** —— 音频设备、ASR 文本输出、"停/急停/取消任务"本地解析链路（必须绕过 LLM）。
-7. **产出接口清单** —— Phase 0 的交付物（见下）。
-8. 只有接口清单标记"通过"的能力，才允许封装为 Skill。
+1. **执行 Phase 0 基线检查** —— `jtop` / `tegrastats` / `df -h /` / `ros2 node|topic|service|action list`，并记录厂商环境加载顺序。
+2. **底盘与安全验收** —— 在车轮悬空或留安全距离条件下测试 `stop()`、低速前进/后退/平移/原地旋转；验证速度上限、命令超时、通信中断停车、遥控优先级；记录坐标系、麦轮运动学约定、`cmd_vel` 类型与单位。
+3. **LiDAR 验收** —— 确认型号、设备路径、波特率（新增线索：syslog 中 `aurora930_node` 反复等设备插入）；验证 `LaserScan` 频率/角度/量程/frame_id 与 TF。
+4. **相机验收** —— Orbbec RGB/Depth/CameraInfo/TF；`cv_bridge` 收图最小验证。
+5. **语音验收** —— 音频设备、ASR 文本输出、"停/急停/取消任务"本地解析链路（必须绕过 LLM）。
+6. **产出接口清单** —— Phase 0 的交付物（见下）。
+7. 只有接口清单标记"通过"的能力，才允许封装为 Skill。
 
-> 原第 1 项（解除磁盘阻塞）已于 2026-09-23 完成。若空间再度紧张，按 `DECISIONS.md` D-014 的顺序处理（先侦察 → 扩容 → 只回收可再生缓存），并参考 D-015 的 PARTUUID 约束。
+> 原第 1 项（磁盘阻塞）、第 2 项（SSH 公钥注册）已于 2026-09-23 完成。若空间再度紧张，按 `DECISIONS.md` D-014 的顺序处理（先侦察 → 扩容 → 只回收可再生缓存），并参考 D-015 的 PARTUUID 约束。
 
 ---
 
