@@ -122,11 +122,15 @@ ros2 action list
 
 > ⚠️ 任何运动测试均必须保留急停、限速和人工看护。
 
-### 4.4 磁盘容量警告
+### 4.4 磁盘容量状态
 
-当前根分区 **96% 已用（58G/64G，仅剩 3.0G）**。
+根分区 **116G，已用 57G，可用 55G（52%）** —— 2026-09-23 已在线扩容（65G → 116G），**磁盘阻塞解除**。
 
-在部署 PyTorch、模型权重、TensorRT Engine、ROS bag 或 Docker 镜像前，**必须先确认可安全扩容或清理**。不要在未确认分区布局前修改分区。
+部署 PyTorch、模型权重、TensorRT Engine、ROS bag 或 Docker 镜像前无需再扩容，但需注意：
+
+- 磁盘仍有约 **119G 未纳入 GPT**（`last-lba=250069646` 限制）。需要时再改 GPT 几何，属**高风险操作**：动手前必须 `sgdisk -b` + `sfdisk -d` 备份，并保留 p1 的 `PARTUUID`（`root=PARTUUID` 写在 `/boot/extlinux/extlinux.conf`，GUID 变更将导致无法启动）。
+- 内存仅 **7.4Gi（8GB 版 Orin）**，`/swapfile` 8G 是实际安全余量，不要随意缩小。
+- `/opt/ota_package` 是**引导链 OTA capsule 载荷**（非残留），`~/.ollama/models` 是 Phase 7 本地小模型候选资产 —— 均不得当作缓存清理。
 
 ---
 

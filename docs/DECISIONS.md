@@ -190,6 +190,50 @@
 
 ---
 
+## D-014：磁盘不足时，优先"扩容 + 只回收可再生缓存"，不删引导链与固件资产
+
+**决策**：根分区空间不足的解法顺序为 ① 先侦察分区布局 ② 扩容 ③ 只回收**可再生**缓存（日志、pip cache、ROS 日志、snap 旧 revision）。以下资产**默认不删**：
+
+| 资产 | 保留原因 |
+|---|---|
+| `/opt/ota_package`（238M） | `TEGRA_BL_*.Cap` / `BOOTAA64.efi` 是 **A/B 引导链 OTA capsule 载荷**，删除会丢失固件 capsule 更新能力，离线难以重建 |
+| `/usr/src/linux-headers-5.15.0-168*`（137M） | 需 `apt purge`，会连带安装新头文件包并升级元包；在接近满的分区上触发 apt 事务风险大于 137M 收益 |
+| `~/.ollama/models`（3.6G） | Phase 7 本地小模型的候选资产，删后需重新 pull（依赖网络） |
+| `~/.vscode-server`（3.9G） | 连上即按需重新下载，由用户按需清理更合适 |
+| `/swapfile`（8G） | 内存仅 7.4Gi，这是实际的安全余量 |
+
+**原因**：
+- 这台机器是**嵌入式设备**，引导链 / 固件 / 离线安装资产一旦删除，恢复成本远高于其占用空间。
+- "看起来像残留"的目录（`ota_package`、内核头）实际承担功能职责，**必须先核查内容再判断**，不能按名字归类为垃圾。
+- 清理上限只有几个 G，而扩容一次可得 52.8G —— 性价比与风险都更优。
+
+**影响 / 约束**：
+- 清理前必须逐项核对内容与归属（`du` / `dpkg -S` / `apt-get --dry-run`），并说明"为什么可以删"。
+- 本机可安全清理的路径：`/var/log/{syslog,kern.log}`（截断）、`~/.cache/pip`、`~/.ros/log`、`snap remove --revision=<旧 rev>`。注意 `~/.ros/rtabmap.db` 是 SLAM 数据库，**不在清理范围**。
+
+---
+
+## D-015：分区扩容必须保留 PARTUUID，用 sfdisk 回灌而非重新创建分区
+
+**决策**：扩容操作固定为 `sgdisk -b` + `sfdisk -d` 备份 → 只改 p1 的 `size` → `sfdisk --no-reread` 回灌 → `partx -u <part>` → `resize2fs`。
+
+**明确不用的做法**：
+- `growpart`：本机（Ubuntu 22.04 aarch64）未安装，需额外装 `cloud-guest-utils`。
+- `sgdisk -d 1` + `sgdisk -n 1:…`：**会重新生成分区 GUID**，除非额外指定 `-u`。
+
+**原因**：
+- 根分区以 **PARTUUID** 引用：`/boot/extlinux/extlinux.conf` 中 `root=PARTUUID=7e601f05-7305-42c0-afad-85b790a82e91`（由 cbootargs 传入）。分区 GUID 一变，系统无法启动。
+- `sfdisk -d` 的 dump 含每个分区的 `uuid=`，原样回灌可完整保留所有 GUID 与分区属性（类型、名称、ESP 标志）。
+- 在线扩容对**最后一个分区**成立：ext4 支持在线增长，`partx -u` 通过 `BLKPG_RESIZE_PARTITION` ioctl 更新内核，无需重启。
+
+**影响 / 约束**：
+- 任何分区操作前必须备份（`sgdisk -b <bin>` + `sfdisk -d > <txt>`），并留档到 `/root`。
+- 操作后**强制复核**：`lsblk -no PARTUUID` 与 `extlinux.conf` 中的 `root=PARTUUID` 必须逐字符一致；`sgdisk -v` 无错误。
+- 回滚：`sgdisk -l <bin>` 恢复分区表；文件系统回缩需离线 `e2fsck` + `resize2fs`（正常不应发生）。
+- 涉及磁盘 / 分区的操作**必须先经用户确认**，不与其它改动混在同一个 commit。
+
+---
+
 ## 待补充的决策（尚未确定）
 
 | 议题 | 说明 |

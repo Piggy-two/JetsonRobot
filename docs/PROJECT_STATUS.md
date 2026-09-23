@@ -9,7 +9,7 @@
 
 ## 1. 一句话状态
 
-**项目处于 Phase 0 起步阶段：设计文档已完成，工程维护机制已建立，尚无任何业务代码，硬件接口验收尚未开始。**
+**项目处于 Phase 0 起步阶段：设计文档已完成，工程维护机制已建立，磁盘阻塞已解除，尚无任何业务代码，硬件接口验收尚未开始。**
 
 ---
 
@@ -23,7 +23,7 @@
 
 | 验收项 | 状态 | 说明 |
 |---|---|---|
-| 基线环境（ROS2 / Jetson / 磁盘） | 🟡 部分完成 | ROS2 Humble 确认；磁盘告警 |
+| 基线环境（ROS2 / Jetson / 磁盘） | 🟢 已完成 | ROS2 Humble、Jetson Orin（8GB，内存 7.4Gi）、磁盘已扩容至 116G；仅剩"厂商环境加载顺序"待记录（已知问题 #6） |
 | 底盘与安全（`ros_robot_controller` / `controller` / `kinematics` / `servo_controller`） | ⬜ 未开始 | 需实机测试 |
 | LiDAR 与避障 | ⬜ 未开始 | 驱动型号待确认 |
 | 相机与视觉（Orbbec） | ⬜ 未开始 | |
@@ -41,6 +41,7 @@
 | 实机环境基线摸底 | 确认 Jetson Orin L4T R36.4.3、ROS2 Humble、厂商 `~/ros2_ws` 与 `~/third_party` 存在 | 2026-09-23 |
 | Git 仓库与远程连接 | `origin` = `git@github.com:Piggy-two/JetsonRobot.git`，SSH over 443 已配置 | 2026-09-23 |
 | 工程维护机制 | `README.md` / `CLAUDE.md` / `docs/` 四份长期文档 / `.gitignore` | 2026-09-23 |
+| 磁盘阻塞解除 | 根分区**在线扩容 65G → 116G**（保留 PARTUUID，未改引导配置、未重启）+ 清理可再生缓存 2.35G；可用 2.9G → 55G | 2026-09-23 |
 
 ---
 
@@ -54,12 +55,15 @@
 
 | # | 问题 | 影响 | 处理 |
 |---|---|---|---|
-| 1 | **根分区仅剩 3.0G（96% 已用，58G/64G）** | 🔴 阻塞 | 部署 PyTorch / 模型权重 / TensorRT Engine / ROS bag / Docker 前必须先清理或扩容。**未确认分区布局前不要改分区** |
+| 1 | ~~根分区仅剩 3.0G（96% 已用）~~ **已解决** | ✅ 已解除 | 2026-09-23 在线扩容至 116G（可用 55G，52%），PARTUUID 保留；详见 `DEVELOPMENT_LOG.md`。剩余 ~119G 未纳入 GPT，**非阻塞** |
 | 2 | **GitHub SSH 22 端口被网络封锁** | 🟡 已规避 | 已在 `~/.ssh/config` 配置走 `ssh.github.com:443`；SSH 公钥仍需注册到 GitHub 账号才能 push |
 | 3 | **SSH 公钥未注册到 GitHub** | 🟡 待用户操作 | 公钥 `~/.ssh/id_ed25519.pub`（尾 `...eLXLE`）需加到 GitHub → Settings → SSH keys |
 | 4 | **LiDAR 驱动型号未确认** | 🟡 待验收 | 候选：`ydlidar_ros2_driver` / `sllidar_ros2` / `sclidar_ros2` / `ldlidar_stl_ros2` / `Aurora930`。必须以实机 launch 与 ROS graph 为准 |
 | 5 | **仓库尚无代码** | ⬜ 非缺陷 | 按 Phase 顺序引入，不要提前创建空模块 |
 | 6 | 厂商栈加载顺序未记录 | 🟡 待补 | 需记录 `ROS_DISTRO` / `AMENT_PREFIX_PATH` / `PYTHONPATH` 与启动脚本来源 |
+| 7 | **内存仅 7.4Gi（8GB 版 Orin）** | 🟡 设计约束 | PyTorch + 视觉 + 本地 LLM 并行余量有限；Phase 6/7 本地小模型选型与并发必须按 8GB 预算设计；`/swapfile` 8G 是实际安全余量，**不要缩** |
+| 8 | syslog 中 `aurora930_node` 反复 `wait device insert...` | 🟡 Phase 0 线索 | 提示 LiDAR 侧可能存在 Aurora930 驱动（待确认是当前状态还是历史日志）；实机验收时以 launch 文件与 ROS graph 为准 |
+| 9 | `apt` 有 1008 个待升级包 | ⬜ 非缺陷 | 暂不升级（升级前需确认不影响厂商 SDK 与内核）；涉及 `linux-headers-generic` 元包，勿单独 purge |
 
 ---
 
@@ -67,15 +71,16 @@
 
 **优先级从高到低：**
 
-1. **解除磁盘阻塞** —— 确认根分区布局，清理或扩容到可用空间。这是所有后续部署的前置条件。
-2. **完成 SSH 公钥注册** —— 使 `git push` 可用。
-3. **执行 Phase 0 基线检查** —— `jtop` / `tegrastats` / `df -h /` / `ros2 node|topic|service|action list`，并记录厂商环境加载顺序。
-4. **底盘与安全验收** —— 在车轮悬空或留安全距离条件下测试 `stop()`、低速前进/后退/平移/原地旋转；验证速度上限、命令超时、通信中断停车、遥控优先级；记录坐标系、麦轮运动学约定、`cmd_vel` 类型与单位。
-5. **LiDAR 验收** —— 确认型号、设备路径、波特率；验证 `LaserScan` 频率/角度/量程/frame_id 与 TF。
-6. **相机验收** —— Orbbec RGB/Depth/CameraInfo/TF；`cv_bridge` 收图最小验证。
-7. **语音验收** —— 音频设备、ASR 文本输出、"停/急停/取消任务"本地解析链路（必须绕过 LLM）。
-8. **产出接口清单** —— Phase 0 的交付物（见下）。
-9. 只有接口清单标记"通过"的能力，才允许封装为 Skill。
+1. **完成 SSH 公钥注册** —— 使 `git push` 可用（`~/.ssh/id_ed25519.pub`，尾 `...eLXLE`）。
+2. **执行 Phase 0 基线检查** —— `jtop` / `tegrastats` / `df -h /` / `ros2 node|topic|service|action list`，并记录厂商环境加载顺序。
+3. **底盘与安全验收** —— 在车轮悬空或留安全距离条件下测试 `stop()`、低速前进/后退/平移/原地旋转；验证速度上限、命令超时、通信中断停车、遥控优先级；记录坐标系、麦轮运动学约定、`cmd_vel` 类型与单位。
+4. **LiDAR 验收** —— 确认型号、设备路径、波特率（新增线索：syslog 中 `aurora930_node` 反复等设备插入）；验证 `LaserScan` 频率/角度/量程/frame_id 与 TF。
+5. **相机验收** —— Orbbec RGB/Depth/CameraInfo/TF；`cv_bridge` 收图最小验证。
+6. **语音验收** —— 音频设备、ASR 文本输出、"停/急停/取消任务"本地解析链路（必须绕过 LLM）。
+7. **产出接口清单** —— Phase 0 的交付物（见下）。
+8. 只有接口清单标记"通过"的能力，才允许封装为 Skill。
+
+> 原第 1 项（解除磁盘阻塞）已于 2026-09-23 完成。若空间再度紧张，按 `DECISIONS.md` D-014 的顺序处理（先侦察 → 扩容 → 只回收可再生缓存），并参考 D-015 的 PARTUUID 约束。
 
 ---
 
