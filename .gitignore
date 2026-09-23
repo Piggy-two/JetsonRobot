@@ -1,0 +1,173 @@
+# ============================================================
+# JetsonRobot .gitignore
+# 技术栈：Jetson Orin (JetPack 6 / L4T R36.4.3) + ROS2 Humble
+#          + Python / C++ + TensorRT / CUDA + 语音 / 视觉
+# 原则：源码与文档进 Git，模型权重 / 构建产物 / 数据 / 密钥不进 Git
+# ============================================================
+
+# ---------- 密钥与凭据（最高优先级，绝不提交） ----------
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.keystore
+secrets/
+.secrets/
+credentials.json
+*token*.json
+*apikey*
+*api_key*
+service-account*.json
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ---------- ROS2 / colcon ----------
+# 注意：build/ install/ log/ 已在上方 Python 段落以 build/ 覆盖一部分，
+# 这里显式声明 ROS2 工作空间的构建产物
+install/
+log/
+*.bag
+*.bag.active
+*.db3
+*.mcap
+rosbag2_*/
+.colcon/
+COLCON_IGNORE
+AMENT_IGNORE
+CATKIN_IGNORE
+.ros/
+*.repos.lock
+
+# ---------- 机器学习 / 模型权重（大文件，禁止直接提交） ----------
+# 如需版本管理模型，请先讨论 Git LFS，不要直接 git add
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.h5
+*.pb
+*.tflite
+*.weights
+*.caffemodel
+*.prototxt
+*.onnx
+*.engine
+*.plan
+*.trt
+*.uff
+*.gguf
+*.mlmodel
+*.ort
+*.dlc
+# 允许小型测试夹具，如确需提交请显式 git add -f 并说明
+!tests/fixtures/**/*.onnx
+
+# ---------- 数据集 / 视频 / 图像采集 ----------
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.MOV
+*.flv
+*.webm
+*.h264
+*.h265
+datasets/
+dataset/
+data/raw/
+JPEGImages/
+Annotations/
+ImageSets/
+SegmentationClass/
+SegmentationObject/
+*.cache
+data.yaml
+classes.names
+*.tfrecord
+*.rosbag
+*.pcd
+*.ply
+*.las
+
+# ---------- 运行日志 / 转储 ----------
+*.log
+*.log.*
+logs/
+crash-*.txt
+core
+core.*
+*.core
+vgcore.*
+*.dmp
+*.trace
+*.prof
+
+# ---------- 编译产物 (C++ / CUDA) ----------
+*.o
+*.a
+*.out
+*.obj
+*.lo
+*.la
+*.gch
+*.pch
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+!**/Makefile.am
+compile_commands.json
+.ninja_deps
+.ninja_log
+
+# ---------- IDE / 编辑器 ----------
+.vscode/
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+*~
+.*.swp
+*.code-workspace
+.cache/
+.clangd/
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+.directory
+
+# ---------- 临时文件 ----------
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+tmp/
+temp/
+*.zip
+*.tar.gz
+*.7z
