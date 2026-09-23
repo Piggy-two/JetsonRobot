@@ -234,6 +234,30 @@
 
 ---
 
+## D-016：Control Skill 接入点为 `/cmd_vel`，不与厂商 app 争 `/controller/cmd_vel`
+
+**决策**：本项目的控制类 Skill 通过发布 `geometry_msgs/msg/Twist` 到 **`/cmd_vel`** 驱动底盘。**不**发布到 `/controller/cmd_vel`，**更不**直接发布 `/ros_robot_controller/set_motor`。
+
+**实测依据**（2026-09-23 Phase 0 基线）：
+
+| 话题 | 发布者 | 订阅者 | 结论 |
+|---|---|---|---|
+| `/cmd_vel` | **0** | 1（`odom_publisher`） | ✅ 干净，专用外部入口 |
+| `/controller/cmd_vel` | **5**（`lidar_app` / `line_following` / `object_tracking` / `self_driving` / … 厂商 app） | 1（`odom_publisher`） | ❌ 多方争用，不可作为接入点 |
+| `/ros_robot_controller/set_motor` | 1（`odom_publisher`） | 1（`ros_robot_controller`） | Primitive 层，Control Skill 不得直接调用 |
+
+**原因**：
+- 厂商的 4~5 个 app 都挂在 `/controller/cmd_vel` 上，且各自带 `enter` / `heartbeat` 服务，**被激活即开始发运动指令**。项目若也接这一条，等于与 app 抢方向盘，且无法解释"车为什么动了"。
+- `/cmd_vel` 是 ROS 生态公认的底盘入口（nav2 / teleop 同约定），发布者当前为 0 —— 独占且可预期。
+- `/ros_robot_controller` 是硬件桥（`set_motor` / servo / buzzer / led / oled），属于 Primitive 层。直接调用它会绕过运动学层与 Safety，违反 D-003 / D-005。
+
+**影响 / 约束**：
+- 运动测试前必须确认厂商 app 未激活；这是 Phase 0 底盘验收的**前置条件**。
+- 麦轮运动学约定、单位、速度上限、命令超时由 `odom_publisher` 决定，需在实测中记录后补充进接口清单。
+- 若将来必须与某个厂商 app 共存，需先明确**互斥与优先级**，不得默认并行发布。
+
+---
+
 ## 待补充的决策（尚未确定）
 
 | 议题 | 说明 |

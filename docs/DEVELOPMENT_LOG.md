@@ -6,6 +6,75 @@
 
 ---
 
+## 2026-09-23（续二）— Phase 0 基线：厂商整机栈 ROS 图实测
+
+### 做了什么
+
+对**正在运行**的厂商整机栈（`bringup`）做**只读**基线测量 —— 未发布任何命令、未改动厂商文件、未动车：
+
+- 环境加载链、启动方式、资源占用
+- 节点 / 话题 / 服务 / action 清单与消息类型
+- 底盘命令链（谁发 `cmd_vel`、谁转发、谁落到硬件）
+- 关键频率实测（`/odom`）
+- 安全相关：厂商 app 的争用点、遥控链路、当前是否静止
+
+### 为什么这么做
+
+"下一步计划"第 1 项即 Phase 0 基线检查，且接口清单需要**实测值**而非包名（CLAUDE.md：仅发现包名不视为验收）。基线必须在**不动车**的前提下完成，因此全程只读。
+
+### 实测结果
+
+**启动与环境加载**
+
+| 项 | 实测 |
+|---|---|
+| 启动方式 | `ros2 launch bringup bringup.launch.py`（PID 706，2026-09-23 20:35:27 启动）—— **非 systemd、非 autostart**，为手工启动 |
+| 环境链 | `~/.zshrc:1` → `source $HOME/ros2_ws/.zshrc` → `source $HOME/ros2_ws/.robotrc` |
+| 平台 | L4T R36.4.3（JetPack 6.x）、aarch64、`5.15.148-tegra` |
+| 资源 | RAM **5472/7620MB**；CPU 7~17%@729MHz（低频，负载很低）；tj 54℃；VDD_IN 4.9W |
+
+**规模**：18 个节点、50+ 话题，其中含 `rosbridge_websocket` / `web_video_server` / `rosapi`（厂商 web 端在运行）
+
+**底盘命令链（本次最重要的发现）**
+
+```text
+/cmd_vel (发布者 0，订阅者 1)  ─┐
+/app/cmd_vel                   ├→ odom_publisher → /ros_robot_controller/set_motor → ros_robot_controller → 电机
+/controller/cmd_vel (发布者 5) ─┘        ↑                                                    ↓
+                                   /odom_raw → ekf_node → /odom (30Hz)     battery/button/imu_raw/joy/sbus
+```
+
+- `/ros_robot_controller` **不订阅任何 `cmd_vel`**，只认 `/ros_robot_controller/set_motor`（`ros_robot_controller_msgs/MotorsState`）→ 它是 Primitive 层硬件桥
+- `odom_publisher` 是**唯一**同时"订阅 `cmd_vel` + 发布 `set_motor`"的节点 → 运动学层
+
+**频率实测**：`/odom` = **30.009 Hz**（min 0.033s / max 0.034s / std 0.00018s）→ 稳定
+
+**遥控与物理输入链路**（安全验收抓手）：`/ros_robot_controller/{sbus, joy, button}` 确认存在（SBUS 遥控 / 手柄 / 物理按键）
+
+**当前安全状态**：被动监听 `/controller/cmd_vel` 8s **无任何消息**；`/client_count` = 0（无 web 客户端）→ **底盘此刻静止、无人远程操控**
+
+**未就绪项**
+
+- **LiDAR**：ROS 图中**无 `/scan`**；`/lidar_app` 订阅列表为空（只发布 `/controller/cmd_vel` 与云台 servo）；`aurora930_node` 进程不存在 → LiDAR 数据根本没进 ROS 图
+- **相机**：仅 `/depth_cam/rgb0/image_raw`，有 publisher 但 6s 采样无消息，且无 CameraInfo / depth 话题
+
+### 遇到的问题
+
+1. **厂商 app 全部具备驱动底盘的能力**（🔴 安全）—— `/controller/cmd_vel` 的 5 个发布者含 `lidar_app` / `line_following` / `object_tracking` / `self_driving`，每个都带 `enter` / `heartbeat` 服务，激活即发运动指令。**这是底盘验收必须先处理的前置风险**（已知问题 #10）。
+2. **LiDAR 完全未就绪** —— 与先前 syslog 中 `aurora930_node ... wait device insert...` 互相印证（该进程当前不在运行，日志疑为历史记录）。已记为已知问题 #4。
+3. **相机有话题无数据** —— 已记为已知问题 #11。
+4. **厂商栈含机械臂/夹爪控制器** —— `/arm_controller`、`/gripper_controller` 提供 `follow_joint_trajectory`。按 D-012 第一版不做机械臂，仅记录其存在。
+5. **内存实测** —— 厂商栈一启动即占 ~5.5G，坐实 8GB 的约束（已知问题 #7）。
+
+### 最终结果
+
+- **Phase 0 基线检查完成**（ROS 图 + 环境加载顺序 + 资源实测）
+- 接口清单填入底盘 / 相机 / LiDAR 实测值；**无一项标"通过"**（运动与传感器均未验收）
+- 新增决策 **D-016**：控制接入点选 `/cmd_vel`，不与厂商 app 争 `/controller/cmd_vel`
+- 全程只读：未发布命令、未改厂商文件、未动车
+
+---
+
 ## 2026-09-23（续）— 解除磁盘阻塞：根分区在线扩容 65G → 116G
 
 ### 做了什么

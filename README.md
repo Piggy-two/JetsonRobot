@@ -80,9 +80,9 @@ LLM 无法直接控制电机；所有动作必须经过 Tool / Skill Safety Gate
 | 计算平台 | NVIDIA Jetson Orin（L4T **R36.4.3**，JetPack 6.x） |
 | OS | Linux `5.15.148-tegra` (aarch64) |
 | ROS2 | **Humble**（`/opt/ros/humble`） |
-| 底盘 | 麦克纳姆轮（厂商 ROS2 栈，含 `ros_robot_controller` / `controller` / `kinematics` / `servo_controller`） |
-| 相机 | Orbbec（`orbbec_camera` / `orbbec_camera_msgs`） |
-| 雷达 | 候选：`ydlidar_ros2_driver` / `sllidar_ros2` / `sclidar_ros2` / `ldlidar_stl_ros2` / `Aurora930` —— **需实机确认** |
+| 底盘 | 麦克纳姆轮（厂商 ROS2 栈，含 `ros_robot_controller` / `controller` / `kinematics` / `servo_controller`）。基线实测命令链：`/cmd_vel` → `odom_publisher` → `/ros_robot_controller/set_motor`；`/odom` 30 Hz |
+| 相机 | Orbbec（`orbbec_camera` / `orbbec_camera_msgs`）。基线实测：仅 `/depth_cam/rgb0/image_raw` 且**无数据流**，待验收 |
+| 雷达 | 候选：`ydlidar_ros2_driver` / `sllidar_ros2` / `sclidar_ros2` / `ldlidar_stl_ros2` / `Aurora930`。基线实测：ROS 图中**无 `/scan`**，**未就绪**，需先查设备连接 |
 | 语音 | `xf_mic_asr_offline`（离线 ASR） |
 | 厂商工作空间 | `~/ros2_ws`（6 类 src 子包）、`~/third_party`（OpenCV / YDLidar-SDK / orbbec / rtabmap / sherpa-onnx / yolo 等） |
 
