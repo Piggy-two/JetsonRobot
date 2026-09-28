@@ -171,3 +171,4 @@ temp/
 *.zip
 *.tar.gz
 *.7z
+src/
