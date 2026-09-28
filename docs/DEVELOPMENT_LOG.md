@@ -6,6 +6,82 @@
 
 ---
 
+## 2026-09-28（续）— LiDAR `/scan` 验收通过 + 相机接入厂商 `usb_cam` 分支
+
+### 做了什么
+
+按用户决策，把上一次侦察留下的两件事**合并到同一次重启**里做完：
+
+1. **确认 `ttyCH341USB1` 身份** —— 跑 `udevadm info -q property / -a`，取 VID:PID、接口类与 USB 物理路径
+2. **改厂商机型配置** —— `~/ros2_ws/.typerc:9` 的 `DEPTH_CAMERA_TYPE` 由 `aurora` 改为 `usb_cam`（改前备份 `.typerc.bak-20260928`）
+3. **首次重启厂商整机栈** —— `sudo systemctl restart start_app_node.service`（此前查明 bringup 由该 systemd 服务拉起，`Type=simple` / `Restart=always` / `KillMode=mixed`）
+4. **验证 `/scan`** —— 频率、角度范围、量程、点数、有效率、`frame_id`、TF
+5. **验证相机** —— 出图、编码、设备侧协商速率、下游 app 兼容性、资源占用
+6. **全程监控 `/controller/cmd_vel`** —— 重启前后各采样，确认没有任何运动指令上线
+
+### 为什么这么做
+
+- **LiDAR 优先级最高**：按 D-017，LiDAR 是避障与建图的**唯一**外部测距来源；udev 根因修好后只差"重启验证"这一步（根因见上一则日志与已知问题 #4）。
+- **相机按 D-019 用厂商既有分支**：厂商 `usb_cam_param.yaml` 与实机摄像头逐项吻合，改一行配置即可，属"用既有能力"而非"造新能力"，代价最小。
+- **两件事合并成一次重启**：每重启一次整机栈都是对运行中系统的一次中断与风险，能合并就合并。
+- **重启前先确认底盘安全**：重启前实测 `/controller/cmd_vel` 无消息，且查明 4 个厂商 app 需显式调用 `set_running` 才发运动指令 —— 即重启只会回到"默认关闭"状态。
+
+### 实测结果
+
+**① `/scan` 验收通过**（这是 Phase 0 至今**第一项**可标"通过"的能力）
+
+| 项 | 实测值 |
+|---|---|
+| 驱动日志 | `ldlidar node start is success` → `ldlidar communication is normal.` → `Publish topic message:ldlidar scan data.` |
+| 节点 / 话题 | `LD19` → `/scan` |
+| 频率 | **10.00 Hz**（`scan_time` 0.1000 s，33 条消息标准差 0.00007 s） |
+| 角度 | 0.0° ~ 360.0°，`angle_increment` 0.7143°~0.7186° |
+| 每帧点数 | 502 ~ 505 |
+| 量程 | 声明 `[0.02, 25.0] m`；实测回波 167 mm ~ 5265 mm |
+| 有效点 | **93.5% ~ 97.0%**（每帧 14~33 点 NaN = 无回波，正常） |
+| `frame_id` | `lidar_frame` |
+| TF | ✅ `base_link → lidar_frame` = `[0.011, 0, 0.136]`，单位四元数 |
+
+**对照**：修复前的启动日志里，同一个节点在 `/dev/lidar` 指向底盘串口时是 `ldlidar communication is abnormal.` + `process has died [exit code 1]` —— **一条日志就把根因坐实了**。
+
+**② 相机接入厂商 `usb_cam` 分支**
+
+| 项 | 实测值 |
+|---|---|
+| 节点日志 | `Starting 'usb_cam' (/dev/video0) at 640x480 via mmap (yuyv) at 30 FPS` |
+| 设备侧协商 | `v4l2-ctl --get-parm` → **640×480 YUYV @ 30.000 fps**（`Size Image` 614400 B） |
+| 话题 | `/depth_cam/rgb0/image_raw`：**0 个发布者 → 1 个**（`usb_cam`），`encoding=yuv422_yuy2` |
+| 话题速率 | ⚠️ 实测 **10.75 / 10.27 Hz**（两次），`camera_info` 10.87 Hz —— **未达设备侧 30 fps**（见「遇到的问题」） |
+| 下游兼容 | 话题名经 remap 后与 aurora 分支**同名**，`yolo` 重启后继续订阅同一话题，**app 侧零改动** |
+| 资源 | `yolo` 随即开跑：**RSS 1010 MB（13.2% 内存）、23.5% CPU**；整机 load 1.34，可用内存 2.8 G |
+
+**③ 安全：重启全程底盘静默**
+
+重启前后多次采样 `/controller/cmd_vel`（`ros2 topic hz` / `echo --once`）**均无任何消息**。5 个发布者节点（`lidar_app` / `line_following` / `object_tracking` / `self_driving` / `joystick_control`）重启后**只注册发布者、不发消息**，且各自带 `set_running` / `enter` / `heartbeat` 服务 —— 坐实**默认关闭、需显式激活**。
+
+**④ `ttyCH341USB1` 定位**（详见已知问题 #14）
+
+`1a86:7523` CH340，路径 `…/usb1/1-2/1-2.4/1-2.4.1/1-2.4.1:1.0/tty/ttyCH341USB1`，接口类 `ff/01/02`，**无厂商字符串、无序列号**（与雷达同型号芯片，描述符无法区分）。该口**不在任何厂商 udev 规则的候选路径中**；它与同层 Hub 上的 USB 声卡（`0c76:161f`）构成"Hub + CH340 + 声卡"的复合形态，**与 `xf_mic.rules` 期望的讯飞环形麦同形**，只是插在口 4 而非规则写死的口 3（口 3 现被相机占用）。
+
+### 遇到的问题
+
+1. **`ros2 topic echo` 会把长数组省略成 `- '...'`** —— 捕获的 `/scan` 只有 129 行数据，一度让人以为"雷达每帧只出 129 个点"。改用 `rclpy` 直接读 `msg.ranges` 才拿到真值 **502~505**。**教训与上次的 `dd`、CRC 同类：测量工具本身会骗人，关键数值必须交叉验证。**
+2. **相机话题速率只有设备侧的 1/3（~10.6 Hz vs 30 fps）—— 原因未定**。候选：① 发布环本就 ~10.6 Hz；② Python 订阅侧丢帧（614 KB/帧 × 30 fps ≈ 18 MB/s）；③ 同 Hub 上等时音频与两个 CH340 分走带宽。`camera_info`（极小消息）曾出现 0.027 s 间隔（≈37 Hz），提示发布器会突发 → 倾向 ②。**未下结论，列为已知问题 #15**，需用 C++ 订阅端或 `usb_cam` 自身计数确认。
+3. **图像 `frame_id=camera` 不在 TF 树中**（树里是 `camera_link0`），另有孤立静态 TF `ascamera_camera_link_0 → depth_cam_color_frame` → 列为 #16。
+4. **`99-usb-cam.rules` 指向不存在的脚本** `~/.dtb/.link_yuyv_camera.sh` → 规则空转，系统里**没有稳定的相机符号链接** → 列为 #17。
+5. **麦克风与相机抢同一个 Hub 口**：`xf_mic.rules` 期望麦克风串口在 `1-2.3.1`，而该口现在是相机 → 这是 Phase 5 语音的前置障碍（#14）。
+6. `usb_cam` 启动时报 `unknown control 'white_balance_temperature_auto'` 与 `white_balance_temperature: Permission denied`（参数文件里的白平衡设置在**这台相机上不存在/只读**）→ 白平衡不会被应用，可能影响 `line_following` 的颜色阈值，留待相机收口时处理。
+
+### 最终结果
+
+- **LiDAR `/scan` 实测通过**，接口清单中 LiDAR 项首次标记"通过"，Phase 0 的硬骨头只剩**底盘与急停运动验收**。
+- 相机由"0 个发布者"变为**已出图**，厂商 app 与 `yolo` 无需改动。
+- 已知问题：**#4 / #11 / #13 关闭**，#10 / #14 更新，**新增 #15（相机速率）/ #16（相机 TF 帧）/ #17（udev 悬空脚本）**。
+- 新增决策 **D-019**（相机接入路线），D-017 中"相机 Driver 一律在 Overlay 自建"的表述按 D-019 修订。
+- 系统侧改动两处，均已备份、可回滚：`/etc/udev/rules.d/lidar.rules`（上一次）与 `~/ros2_ws/.typerc`（本次）。
+
+---
+
 ## 2026-09-28 — 硬件接口全量侦察：USB 拓扑 / LiDAR 型号确认 / 相机定性为单目
 
 ### 做了什么

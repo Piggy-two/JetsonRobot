@@ -46,7 +46,7 @@
 
 | Level | 名称 | 内容 | 状态 |
 |---|---|---|---|
-| Level 0 | Hardware Capability | Motor / Camera / LiDAR / Microphone / Speaker / IMU，通过 `/dev/rrc`（底盘）、`/dev/lidar`（雷达）、`/dev/video0`（单目相机）、USB 声卡、CAN / I2C / SPI / PWM / USB 访问。**不直接暴露给 LLM** | 🟡 设备均已**实测存在**（2026-09-28，见 `PROJECT_STATUS.md` §7 与 D-017 / D-018）；**验收结果另计** |
+| Level 0 | Hardware Capability | Motor / Camera / LiDAR / Microphone / Speaker / IMU，通过 `/dev/rrc`（底盘）、`/dev/lidar`（雷达）、`/dev/video0`（单目相机）、USB 声卡、CAN / I2C / SPI / PWM / USB 访问。**不直接暴露给 LLM** | 🟡 设备均已**实测存在**（2026-09-28，见 `PROJECT_STATUS.md` §7 与 D-017 / D-018）→ **LiDAR 已通过验收**（`/scan` 10.00 Hz / 360°）、**相机已出图**；底盘运动仍未测 |
 | Level 1 | Driver / Primitive | `set_motor_speed()` / `read_camera_frame()` / `read_lidar_scan()` / `read_imu()` / `play_audio()`。确定性、高频、靠近硬件、不依赖 Agent | 📋 |
 | Level 2 | Control Skill | `move_forward()` / `move_backward()` / `rotate()` / `move_relative()` / `stop()`。内部含 PID、轮速控制、里程计、编码器反馈、麦轮运动学 | 📋 |
 | Level 3 | Autonomous Skill | `navigate_to()` / `follow_person()` / `follow_line()` / `avoid_obstacle()` / `patrol_route()` / `return_home()`。Jetson 本地闭环，不需要 LLM 高频参与 | 📋 |
@@ -305,6 +305,8 @@ Camera → GStreamer → CUDA → TensorRT → YOLO → Tracker
 > - `get_target_position()` **不能**沿用"深度对齐"方案，需改为单目方案（像素几何 + 已知目标尺寸 / 标定 + LiDAR 辅助），实现时追加决策记录。
 > - `avoid_obstacle()` 的测距来源**只能依赖 LiDAR**（D-018），不得设计成依赖深度图。
 > - 建图**不能**走 RGBD SLAM，只能走 2D LiDAR SLAM。
+> - **Phase 0 的相机接入走厂商 `usb_cam` 分支**（改 `.typerc` 一行，见 **D-019**），其话题经 remap 后与旧深度分支同名（`/depth_cam/rgb0/image_raw`），下游 app 无需改动；若 Phase 1 改为 Overlay 自建 Driver，需先更新 D-019。
+> - ⚠️ 图像 `frame_id=camera` **不在 TF 树中**（树里是 `camera_link0`，见 `PROJECT_STATUS.md` #16）—— 做视觉 Skill 前必须补齐或显式指定相机帧，**不得假设图像帧可直接做 TF 变换**。
 
 ---
 

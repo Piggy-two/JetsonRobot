@@ -81,8 +81,8 @@ LLM 无法直接控制电机；所有动作必须经过 Tool / Skill Safety Gate
 | OS | Linux `5.15.148-tegra` (aarch64) |
 | ROS2 | **Humble**（`/opt/ros/humble`） |
 | 底盘 | 麦克纳姆轮（厂商 ROS2 栈，含 `ros_robot_controller` / `controller` / `kinematics` / `servo_controller`）。基线实测命令链：`/cmd_vel` → `odom_publisher` → `/ros_robot_controller/set_motor`；`/odom` 30 Hz |
-| 相机 | **单目** USB 摄像头（UVC `32e6:9005`，YUYV 640×480@30，`/dev/video0`）。全系统**无深度相机**，视觉基线见 `docs/DECISIONS.md` D-017 |
-| 雷达 | **LD19**（`ldlidar_stl_ros2`，230400，`/dev/lidar`）。设备实测健康（CRC 99.9% 通过、360° 完整扫描，见 D-018）；`/scan` 待重启厂商栈后验证 |
+| 相机 | **单目** USB 摄像头（UVC `32e6:9005`，YUYV 640×480@30，`/dev/video0`）。全系统**无深度相机**，视觉基线见 `docs/DECISIONS.md` D-017；已按 D-019 走厂商 `usb_cam` 分支，`/depth_cam/rgb0/image_raw` 已出图（话题速率与 TF 帧待收口） |
+| 雷达 | **LD19**（`ldlidar_stl_ros2`，230400，`/dev/lidar`）。✅ **`/scan` 实测通过**：10.00 Hz、360°、502~505 点/帧、有效回波 93.5~97.0%、`frame_id=lidar_frame`，TF 已就位（见 D-018 与 `docs/PROJECT_STATUS.md` §7） |
 | 语音 | `xf_mic_asr_offline`。配置为 `MIC_TYPE=xf` / `ASR_MODE=online`（⚠️ 在线 ASR，断网降级方案待确认）；USB 声卡已识别，`/dev/ring_mic` 待建立 |
 | 厂商工作空间 | `~/ros2_ws`（6 类 src 子包）、`~/third_party`（OpenCV / YDLidar-SDK / orbbec / rtabmap / sherpa-onnx / yolo 等） |
 
@@ -120,6 +120,8 @@ ros2 action list
 
 **验收顺序**：底盘与急停 → LiDAR 与 TF → 里程计与定位 → 建图 / 保存地图 → 导航到测试点 → 静态障碍物避障 → 相机、语音与导航联调。
 
+> 实际推进：**LiDAR 与 TF ✅ 已通过**（2026-09-28，`/scan` 10.00 Hz / 360°），相机已出图待收口，**底盘与急停仍待实机运动验收**（最高优先）。
+
 > ⚠️ 任何运动测试均必须保留急停、限速和人工看护。
 
 ### 4.4 磁盘容量状态
@@ -140,7 +142,7 @@ ros2 action list
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| **Phase 0** | 环境与硬件启动验收（底盘 / LiDAR / 相机 / 麦克风 / 扬声器 + 接口清单） | 🚧 **进行中** |
+| **Phase 0** | 环境与硬件启动验收（底盘 / LiDAR / 相机 / 麦克风 / 扬声器 + 接口清单） | 🚧 **进行中**（LiDAR 已通过；剩余底盘运动 / 相机收口 / 语音） |
 | Phase 1 | Driver / Primitive（Camera / Motor / LiDAR Driver） | ⬜ 未开始 |
 | Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | ⬜ 未开始 |
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |

@@ -280,7 +280,7 @@
 - **测距与避障一律依赖 LiDAR**（详见 D-018 的 LD19）。不得为避障设计依赖深度的方案。
 - **不能做 RGBD SLAM**；建图只能走 2D LiDAR SLAM（`slam_gmapping` / `rtabmap` 的 2D 模式）。
 - D-007 所列 `get_target_position()` / `describe_scene()` 需要改为**单目方案**（基于像素几何 + 已知目标尺寸 / 标定 + LiDAR 辅助），实现时需追加决策记录，不得沿用"深度对齐"的原始设想。
-- `~/ros2_ws/.typerc` 是厂商的**机型配置文件**（按机型切换 `LIDAR_TYPE` / `DEPTH_CAMERA_TYPE` / `MIC_TYPE` 等，注释中即列有备选机型），填的机型与实际硬件不符属**配置项写错**，不是代码缺陷。但修改它仍是改动厂商配置（D-009），需先记录再动；本项目自己的相机 Driver 仍在 Overlay 中自建，不复用厂商 `usb_cam` 的 remap 约定。
+- `~/ros2_ws/.typerc` 是厂商的**机型配置文件**（按机型切换 `LIDAR_TYPE` / `DEPTH_CAMERA_TYPE` / `MIC_TYPE` 等，注释中即列有备选机型），填的机型与实际硬件不符属**配置项写错**，不是代码缺陷。但修改它仍是改动厂商配置（D-009），需先记录再动 —— **2026-09-28 已按用户决策改为 `usb_cam` 并重启实测出图，见 D-019**；相机 Driver 的最终归属（复用厂商 `usb_cam` 还是在 Overlay 自建）改由 D-019 决定。
 - 若未来加装深度相机，本决策**需显式推翻并记录替代决策**，不得默默启用。
 
 ---
@@ -308,6 +308,35 @@
 - **两个 CH340 均无序列号**（`1a86:7523`，`serial` 为空），无法靠 ID 区分，**只能按物理路径匹配**。`/etc/udev/rules.d/lidar.rules` 中的 `KERNELS=="1-2.1:1.0"` 一旦更换 USB 插口即失效，需同步修改。
 - 该 udev 规则是**厂商装到系统的文件（非仓库文件）**，本次修改已备份为 `lidar.rules.bak-20260928`；此类系统级改动必须留备份并在 `DEVELOPMENT_LOG.md` 记录。
 - LiDAR 数据是**避障与建图的唯一外部测距来源**（见 D-017），因此 `/scan` 的验收优先级高于相机。
+
+---
+
+## D-019：相机接入先沿用厂商 `usb_cam` 分支（改 `.typerc`，暂不自建 Driver）
+
+**决策**：Phase 0 的相机验收走**厂商既有 `usb_cam` 分支** —— 把 `~/ros2_ws/.typerc:9` 的 `DEPTH_CAMERA_TYPE` 由 `aurora` 改为 `usb_cam`，由厂商 `peripherals/launch/depth_camera.launch.py` 启动 `usb_cam_node_exe`。**本项目暂不在 Overlay 自建单目 Driver**；是否在 Phase 1 自建，等接口清单收口后再定。
+
+**实测依据**（2026-09-28 改后重启厂商栈实测）：
+
+| 项 | 实测 |
+|---|---|
+| 启动 | `usb_cam_node_exe` 正常起：`Starting 'usb_cam' (/dev/video0) at 640x480 via mmap (yuyv) at 30 FPS` |
+| 设备侧速率 | `v4l2-ctl -d /dev/video0 --get-parm` → **640×480 YUYV @ 30.000 fps**；`--get-fmt-video` → `YUYV`，`Size Image` 614400 B |
+| 话题 | `/depth_cam/rgb0/image_raw` 由 **0 个发布者 → 1 个**（`usb_cam`），`encoding=yuv422_yuy2` |
+| 话题速率 | ⚠️ 实测仅 **~10.3–10.9 Hz**，未达设备侧 30 fps（见已知问题 #15） |
+| 话题名兼容 | `usb_cam.launch.py` 已把 `image_raw` remap 成 `/depth_cam/rgb0/image_raw` 等 5 个**与 aurora 分支同名**的话题 → `yolo` / `line_following` / `object_tracking` 无需改动（重启后 `yolo` 确实继续订阅同一话题） |
+| URDF | `mecanum.xacro` 中 `camera_type` 属性**已被注释**，改该环境变量**不影响 URDF / TF 树** |
+| 资源 | 相机一通，`yolo` 随即开跑：**RSS 1010 MB（13.2% 内存）、23.5% CPU** |
+
+**原因**：
+- 厂商 `peripherals/config/usb_cam_param.yaml` 的参数（`/dev/video0` + `yuyv` + 640×480@30）与实测摄像头**逐项吻合** —— 厂商显然为同一款单目相机准备了这个分支。**优先用既有能力，而不是造新能力。**
+- `depth_camera.launch.py` 的 `else` 分支兜底：`DEPTH_CAMERA_TYPE` 只要不是 `ascamera` / `aurora` 就走 `usb_cam`，**只改一行配置、不改任何代码**。
+- 相机是**单目**（D-017），自建 Driver 的收益主要在 Phase 1 的框架统一性，**不构成 Phase 0 验收的阻塞项**；先让真实数据流通起来，再决定要不要重写。
+
+**影响 / 约束**：
+- 这是**改动厂商配置文件**（D-009）：`~/ros2_ws/.typerc` 已备份为 `.typerc.bak-20260928`，**可一键回滚**；此类系统级改动必须在本文件与 `DEVELOPMENT_LOG.md` 留痕。
+- 该变量**不止相机分支在读**：`line_following` / `object_tracking` / `ar_detect` / `color_detect` / `vllm_track` 等都以 `os.environ['DEPTH_CAMERA_TYPE']` 切换内部相机类型分支（`Mono` / `Stereo`）。改动会影响它们的行为，**后续若发现厂商 app 表现异常，先回看这里**。
+- ⚠️ **麦克风与相机在抢同一个 Hub 口**：厂商 `xf_mic.rules` 期望麦克风串口在 `1-2.3.1`，而 `1-2.3` 现在是相机。将来要恢复语音必须先解决这个物理口冲突（见已知问题 #14）。
+- ⚠️ 图像 `frame_id` 为 `camera`，而 TF 树里的相机帧是 `camera_link0` —— **图像帧无法在 TF 中解析**（厂商遗留不一致，见已知问题 #16）。本项目做视觉 Skill 时必须显式处理，**不得假设图像帧可直接变换**。
 
 ---
 
