@@ -6,6 +6,122 @@
 
 ---
 
+## 2026-09-28 — 硬件接口全量侦察：USB 拓扑 / LiDAR 型号确认 / 相机定性为单目
+
+### 做了什么
+
+用户提出「设备上四个 USB 口都接了东西，能否检测到」，由此对**全部外部硬件接口**做了一次系统侦察：
+
+1. **四个 USB 口逐口识别** —— 含 Hub 拓扑（发现口 4 下还套了一层 Hub）
+2. **LiDAR 型号实测确认** + 数据质量验证（协议、CRC、点频、角度覆盖）
+3. **相机定性** —— 确认全系统只有**一个单目**摄像头，无任何深度设备
+4. **定位并修复**「LiDAR 无 `/scan`」的根因（系统 udev 规则错配）
+5. **定位**厂商机型配置 `.typerc` 与实际硬件的错配
+6. 取得**运行中进程的真实环境变量**（`/proc/<pid>/environ`），坐实厂商栈的实际加载配置
+
+侦察期间厂商 `bringup` 整机栈**处于运行状态**（18 个节点在线）。全程**只读**：未发布任何命令、未动车、未改动厂商 `ros2_ws` / `third_party`。**唯一的写操作是修正一个系统 udev 规则**（修改前已备份）。
+
+### 为什么这么做
+
+- Phase 0 的交付物是**接口清单**，而「下一步计划」第 2、3 项（LiDAR / 相机）此前一直卡在"先查设备连接"这一步，无法推进。
+- 已知问题 #4 记的是「LiDAR 未就绪（型号亦未确认），先查物理连接」——**连接状态本身就没查过**，属于必须补上的侦察。
+- 这类侦察必须在**不动车**的前提下完成，因此全程只读。
+
+### 实测结果
+
+**USB 拓扑**（`lsusb -t` + `/sys/bus/usb/devices` + `udevadm`）
+
+```text
+Jetson 根 Hub (bus 1)
+└─ 端口 2 ─→ Realtek 4 口 Hub  ← 机器人扩展板的 4 个 USB 口，4 口全满
+   ├─ 口 1  1-2.1    CH340  1a86:7523   → /dev/ttyCH341USB0 = /dev/lidar  ★ LD19 激光雷达
+   ├─ 口 2  1-2.2    CH9102 1a86:55d4   → /dev/ttyACM0      = /dev/rrc    ★ 底盘控制板
+   ├─ 口 3  1-2.3    icSpring 32e6:9005 → /dev/video0,1                  ★ 单目摄像头
+   └─ 口 4  1-2.4    QinHeng Hub 1a86:8091  ← 又套一层 Hub
+      ├─ 1-2.4.1    CH340  1a86:7523   → /dev/ttyCH341USB1   静默，身份未确认
+      └─ 1-2.4.2    JMTek  0c76:161f   → 声卡 0 + event1      ★ USB 声卡 / 麦克风
+
+另有 1-3 = Realtek 13d3:3549 蓝牙（板载 WiFi/BT 模块，非外部口）
+USB3 侧（bus 2）的 4 口 Hub 上无任何设备
+```
+
+> 口 2 被 `ros_robot_controller`（PID 2884）与 PID 689 以 `F....` 方式持有 → 底盘链路确认走 `ttyACM0`。
+
+**LiDAR：型号与健康度**（230400 波特率被动读取，**未启动任何驱动**）
+
+| 项 | 实测 | 结论 |
+|---|---|---|
+| 协议 | `0x54 0x2C` 帧头，包长**恒为 47 字节** | LD19/LD06 协议 |
+| CRC | 多项式 `0x4D`，**1248/1249 包通过（99.9%）** | 报文真实有效，非噪声 |
+| 字节守恒 | 416.5 包/秒 × 47 B = **19576 B/s**，端口实测 **19579 B/s** | 偏差 0.01% → 每一字节都被包结构解释 |
+| 点频 | **4992 点/秒** | 规格 4500 点/秒（10 Hz × 450） |
+| 角度覆盖 | 起始角 2.5° → 356.3°，488 个不同起始角 | **完整 360°** |
+| 测距 | 14976 点**全部有效**（166~2453 mm，中位 262 mm） | 零无效点 |
+
+→ **雷达本身完全健康。** 型号确认为 **LD19**（与厂商 `LIDAR_TYPE=LD19` 一致）。
+
+踩坑记录：首次用 `dd bs=4700 count=1` 采样只得到 64 字节，误以为速率极低。实为 **`dd` 在指定 `count` 时每次只做一次 `read()`**，取到的是瞬时缓冲量，**不是速率测量**。改用 `select` 连续读取 6 秒后才得到真实速率。另：不做 CRC 校验的朴素 `54 2C` 同步会混入假包（曾出现 63020 mm 的超量程值），**CRC 过滤后无效点归零**。
+
+**相机：定性为单目**（`v4l2-ctl` + UVC 描述符 + 全总线枚举）
+
+| 项 | 实测 |
+|---|---|
+| 摄像头数量 | **全系统仅 1 个**：UVC `32e6:9005`「icspring camera」@ `1-2.3` |
+| 节点 | `/dev/video0` = Video Capture（YUYV 640×480@30）；`/dev/video1` = **Metadata Capture**（`UVCH` UVC 载荷头元数据，**不是深度流**） |
+| 格式 | UVC 描述符中**仅 1 种格式**（`guidFormat 32595559…` = YUYV），无任何深度/IR 的 GUID；控制项无 ToF/IR 相关 |
+| 深度设备 | ❌ 无 Deptrum（`3251`）、无 Orbbec（`2bc5`）；CSI 侧 `tegra-camrtc` 亦无 sensor 注册 |
+
+**运行中厂商栈的真实配置**（`/proc/<bringup_pid>/environ`）
+
+```text
+LIDAR_TYPE=LD19          DEPTH_CAMERA_TYPE=aurora      MACHINE_TYPE=ROSOrin_Mecanum
+need_compile=False       ROS_DISTRO=humble             ROS_DOMAIN_ID=0
+```
+
+定义位置：`~/ros2_ws/.zshrc` → `.robotrc` → **`.typerc`**（机型配置文件，逐项含 `LIDAR_TYPE` / `DEPTH_CAMERA_TYPE` / `MIC_TYPE=xf` / `ASR_MODE=online`）。
+
+### 遇到的问题
+
+1. **`/dev/lidar` 被 udev 指向了底盘串口**（🔴 本次最重要发现，也是已知问题 #4 的真正根因）
+
+   ```text
+   /etc/udev/rules.d/lidar.rules 中启用的规则:   KERNELS=="1-2.2:1.0"  → SYMLINK+="lidar"
+   而 1-2.2 是底盘 CH9102 → ttyACM0 (=/dev/rrc)
+   真正的雷达在 1-2.1  → ttyCH341USB0
+   ```
+
+   链条：雷达健康但 `ldlidar` 节点要打开 `/dev/lidar`（=`ttyACM0`，已被底盘进程独占）→ **节点起不来** → ROS 图中无 `/scan`。这解释了 2026-09-23 基线里「无 `/scan`」与 syslog 里 `wait device insert...` 的全部现象，**根因不在硬件**。
+
+   另注：厂商自带的 `usb_ch341` 驱动把 CH340 命名为 `/dev/ttyCH341USB*`（而非内核标准的 `ttyUSB*`），这也是「按 `ttyUSB0` 找不到雷达」的表面原因。
+
+   **处置**：改 `lidar.rules` 为 `KERNELS=="1-2.1:1.0"`（旧行保留为注释并写明原因），备份为 `lidar.rules.bak-20260928`。`udevadm test` **dry-run 先验证**（雷达设备 → `LINK 'lidar'`；底盘设备 → `Removing/updating old device symlink '/dev/lidar', which is no longer belonging to this device`），再**只对雷达那一个设备**触发 uevent（该口无人占用）。
+
+   ```text
+   修正前: /dev/lidar -> ttyACM0        (底盘串口，错)
+   修正后: /dev/lidar -> ttyCH341USB0   (LD19 雷达)
+   /dev/rrc -> ttyACM0 未变；底盘进程 PID 689 / 2884 未受影响
+   ```
+
+2. **Aurora930 是深度相机，不是 LiDAR** —— 此前基线把 `aurora930_node` 当成雷达驱动来排查（已知问题 #8），方向错了。它是 Deptrum 的**深度相机**（VID `3251`）驱动，本机无此设备，故节点 `21:12:20` 报 `No deptrum device connected! It's going to quit...` 后退出。
+
+3. **`.typerc` 机型配置与实机不符** —— `DEPTH_CAMERA_TYPE=aurora` 期望深相机，实机是单目。旁证：厂商 `usb_cam` 分支的 `usb_cam_param.yaml`（`/dev/video0` + `yuyv` + 640×480）**与实机摄像头完全吻合**，且 `usb_cam` 包**已随系统安装在 `/opt/ros/humble`** —— 说明本机本该走 `usb_cam` 分支，`.typerc` 的机型填错了。**未改动**（属厂商配置，D-009）。
+
+4. **`ttyCH341USB1` 身份未确认** —— 口 4 副 Hub 下有一个静默 CH340。`xf_mic.rules` 期望的 `/dev/ring_mic`（口 `1-2.3.1`）在本机**不存在**，故疑其为讯飞环形麦的串口控制口（与同处 `1-2.4` 的 USB 声卡构成一个复合设备），也可能属云台/舵机控制器。**待实测**（新记已知问题 #14）。
+
+5. **两个 CH340 均无序列号** —— `1a86:7523` 的 `serial` 字段为空，无法按 ID 区分雷达与另一路 CH340，**只能按物理路径匹配**。这意味着 `/dev/lidar` 规则绑定 `1-2.1:1.0`，**更换 USB 插口即失效**，是已知的脆弱点（已写入 D-018）。
+
+### 最终结果
+
+- 四个 USB 口**全部识别**，并建立完整 USB 拓扑图（已写入接口清单）
+- **LiDAR 型号确认为 LD19**，且实测证明**设备健康**（CRC 99.9%、360° 完整、4992 点/秒）
+- **相机定性为单目**，全系统无任何深度设备
+- 新增决策 **D-017**（视觉基线为单目，不假设深度）与 **D-018**（LiDAR 型号与 `/dev/lidar` 接入约定）
+- 已知问题：#4 / #6 / #8 / #11 **更新**（#6、#8、#11 定性关闭），新增 **#13**（`.typerc` 配置错配）、**#14**（`ttyCH341USB1` 身份）
+- **`/scan` 尚未验证** —— 因未重启厂商栈（用户选择"改 udev 但不重启"），驱动未运行；`/scan` 验收需重启后完成
+- 未发布任何运动命令、未动车、未改动厂商 `ros2_ws` / `third_party`；系统 udev 改动已备份
+
+---
+
 ## 2026-09-23（续二）— Phase 0 基线：厂商整机栈 ROS 图实测
 
 ### 做了什么

@@ -81,9 +81,9 @@ LLM 无法直接控制电机；所有动作必须经过 Tool / Skill Safety Gate
 | OS | Linux `5.15.148-tegra` (aarch64) |
 | ROS2 | **Humble**（`/opt/ros/humble`） |
 | 底盘 | 麦克纳姆轮（厂商 ROS2 栈，含 `ros_robot_controller` / `controller` / `kinematics` / `servo_controller`）。基线实测命令链：`/cmd_vel` → `odom_publisher` → `/ros_robot_controller/set_motor`；`/odom` 30 Hz |
-| 相机 | Orbbec（`orbbec_camera` / `orbbec_camera_msgs`）。基线实测：仅 `/depth_cam/rgb0/image_raw` 且**无数据流**，待验收 |
-| 雷达 | 候选：`ydlidar_ros2_driver` / `sllidar_ros2` / `sclidar_ros2` / `ldlidar_stl_ros2` / `Aurora930`。基线实测：ROS 图中**无 `/scan`**，**未就绪**，需先查设备连接 |
-| 语音 | `xf_mic_asr_offline`（离线 ASR） |
+| 相机 | **单目** USB 摄像头（UVC `32e6:9005`，YUYV 640×480@30，`/dev/video0`）。全系统**无深度相机**，视觉基线见 `docs/DECISIONS.md` D-017 |
+| 雷达 | **LD19**（`ldlidar_stl_ros2`，230400，`/dev/lidar`）。设备实测健康（CRC 99.9% 通过、360° 完整扫描，见 D-018）；`/scan` 待重启厂商栈后验证 |
+| 语音 | `xf_mic_asr_offline`。配置为 `MIC_TYPE=xf` / `ASR_MODE=online`（⚠️ 在线 ASR，断网降级方案待确认）；USB 声卡已识别，`/dev/ring_mic` 待建立 |
 | 厂商工作空间 | `~/ros2_ws`（6 类 src 子包）、`~/third_party`（OpenCV / YDLidar-SDK / orbbec / rtabmap / sherpa-onnx / yolo 等） |
 
 > ⚠️ 厂商 `ros2_ws` 与 `third_party` 作为**系统 SDK** 使用，保持不改动。本项目代码放在独立的 Overlay Workspace（计划名 `embodied_agent_ws`）。
