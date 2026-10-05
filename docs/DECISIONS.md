@@ -418,6 +418,72 @@
 
 ---
 
+## D-022：相机「内容延迟」仅约一帧，但 `header.stamp` 比真实采集时刻早 0.72 s；语音盒卡在一条过期 udev 规则
+
+**决策**：
+
+1. **相机硬件判定为「可用」**，Phase 4 视觉功能按 **端到端延迟 ≈ 一帧（20~45 ms）** 做预算。
+2. **但图像 `header.stamp` 不可信** —— 比真实采集时刻早约 **0.72 s**（稳态 −741 ms、抖动仅 12 ms）。**任何用到图像时间戳的融合（TF 查询、与 `/odom` 对齐、目标位置计算）都必须先在自己的 Driver 层重新打时间戳**，不得直接使用厂商 `usb_cam` 的 `header.stamp`。
+3. **相机话题速率 22.6 Hz 是主机侧丢帧**，既不是设备能力，也不是订阅端解析慢。
+4. **语音盒硬件判定为「可用」**：控制串口 / 录音 / 播放三项全部实测通过；`/dev/ring_mic` 缺失**只是 udev 规则路径过期**，已修正。
+
+**实测依据**（2026-10-05，人工在场）：
+
+### 相机端到端延迟 —— 用「传感器端打光」当探针
+
+`v4l2` 的 `brightness` 是 ISP 数字偏移、**逐帧立即生效**。在 `t_cmd` 时刻改变亮度，看画面变化出现在哪一帧：
+
+| 订阅 | 收到的时刻 − 下发时刻 | 该帧 `header.stamp` − 下发时刻 |
+|---|---|---|
+| `/depth_cam/rgb0/image_raw`（614 KB） | **+111 ~ +135 ms** | −604 ~ −628 ms |
+| `/depth_cam/rgb0/image_compressed`（~30 KB） | **+19 ~ +44 ms** | −692 ~ −716 ms |
+
+- 只有 `image_compressed` 那条 19~44 ms 是相机管线的真实贡献（约一帧）；raw 多出的约 90 ms 是**订阅端在 Python 里解析 614 KB 的开销**，不是相机的。
+- 内容在 `t_cmd` 就变了，**携带该内容的帧的时间戳却落在 `t_cmd − 0.6~0.7 s`** → **内容新鲜、时间戳陈旧**。
+- 稳态偏移：raw **−741.2 ms**（抖动 12.4 ms，306 帧）、compressed **−737.8 ms**（抖动 21.9 ms，340 帧）。两条话题一致。
+
+### 被排除的解释
+
+| 假设 | 否证 |
+|---|---|
+| 订阅队列积压 | 全新 `depth=1 + BEST_EFFORT` 订阅者的**第一条消息**就已 −738 ms，且此后不收敛 |
+| 仿真时钟 | `use_sim_time: false`，全系统无 `/clock` 话题 |
+| 启动时冻结的「单调→实时」换算基准 | 服务启动至今 `(实时−单调)` 仅变化约 **0.04 s**；而开机时时钟曾被 NTP 跳过约 31 分钟。该假设只能预测 0.04 s 或约 1878 s，都不是 0.72 s |
+| 同一话题有两个发布者交错 | `ros2 topic info -v` 实测 **Publisher count = 1**（`/usb_cam`；`/yolo` 是订阅者） |
+| USB 带宽不足 | dmesg 无任何 UVC 带宽/等时错误；相机独占 `Port2→Port3` 的 480M 链路，单进程持有 `/dev/video0` |
+| 设备只支持低速档 | `--list-formats-ext`：640×480 YUYV **只有 30/25/20/15/10/5 六档**，没有 22.6；`--get-parm` 明确协商 **30.000 fps** |
+
+**机制未定。** 本机 `usb_cam` 只有二进制（`/opt/ros/humble/lib/usb_cam/usb_cam_node_exe`，35 KB，stripped，另加 `libusb_cam*.so`），**没有源码可读**，无法确认这个时间戳是在 `usb_cam` 内部还是 `uvcvideo` 驱动的哪一步产生的。**但这不影响处置** —— 「在自己的 Driver 层重新打时间戳」是与机制无关的稳妥做法。
+
+### 语音盒
+
+| 项 | 实测 |
+|---|---|
+| 控制串口 | `/dev/ttyCH341USB1` @ USB 路径 **`1-2.4.1`**（`1a86:7523` CH340），可正常打开、无进程占用（`ttyCH341USB0` 归雷达） |
+| `/dev/ring_mic` | ❌ → ✅：`/etc/udev/rules.d/xf_mic.rules` 第 4 行写的是 `KERNELS=="1-2.3.1:1.0"`，而**该口现在是相机**；实际是 `1-2.4.1:1.0`。改为实际路径 + `udevadm control --reload-rules` 后，`/dev/ring_mic -> ttyCH341USB1` 正确建立 |
+| 音频设备 | card 0 = `0c76:161f`「USB PnP Audio Device」，`usb-...-2.4.2`（与串口**同一个 Hub**）。播放 S16_LE/2ch/**48000**（ADAPTIVE）、录音 S16_LE/2ch/**48000**（ASYNC）。**只支持 48 kHz**，软件侧不得请求 44.1 kHz |
+| 录音 | ✅ 增益 496（最大）下：峰值 7565 / RMS 458 / **削顶 0%** / 差分 RMS 634（证明是真实声音，不是直流） |
+| 播放 | ✅ `aplay` 无报错，**用户确认听到 440 Hz 提示音** |
+| ASR 栈 | ✅ 修正后 `ros2 launch xf_mic_asr_offline mic_init.launch.py` 正常启动：`awake_node.py`（唤醒词 `hello hi wonder`）、`asr_node.py`、`voice_control` 全部进入运行态 |
+| `MIC_TYPE` | 已是 `xf`（设在 `~/.zshrc`，系统服务 `ExecStart` 会 source 它）—— **不是**阻塞项 |
+
+**原因 / 影响**：
+
+- 「内容新、时间戳旧」的组合意味着**不能靠调缓冲或换 `io_method` 修好** —— 问题不在管线深度。
+- 22.6 Hz 与「设备只有 6 个离散档」共同说明：**主机侧只在有可用缓冲时才取帧**，`uvcvideo.nodrop=0` 使未取到的帧整帧丢弃。故**提高发布速率不能靠调 `framerate`**（它本来就是 30）。
+- 语音的修正都在**系统层**（`/etc/udev/rules.d/`、`amixer`），**没有改动厂商仓库**。
+- ⚠️ **事故记录**：本轮为测录音执行了 `amixer -c 0 sset 'Mic' 80% unmute`。该简单控件**同时含 playback 与 capture 两侧**，于是**误开了麦克风直通（sidetone）**，与扬声器构成啸叫环路，录到满量程削顶（峰值 32768 / RMS 31588）。已用 `sset 'Mic' playback mute` 复原。**教训：本机 `Mic` 控件是双向的，改之前必须看清是 `capture` 还是 `playback`。**
+
+**遗留 / 下一步**：
+
+- **相机 `frame_id=camera` 不在 TF 树（#16）**：`ascamera.xacro` **只定义 `camera_link0`**（`base_link → camera_link0`，`xyz=[0.057373, 7.9091e-05, 0.091864]`，`rpy=0 0 0`）；URDF 里**不存在** `camera` / `ascamera_camera_link_0` / `depth_cam_color_frame`。厂商 `depth_camera.launch.py` 里那个节点发布的是**两个都不存在的帧**（复制粘贴残留，把 `ascamera.launch.py` 的第一段参数丢掉了）。
+  **正确补救是补发一条 `camera_link0 → camera`**，且**必须落在 Overlay，不得修改厂商文件**（CLAUDE.md §2 / §8）。
+  ⚠️ 注意：厂商那条例子里用的四元数 `(-0.7071, 0, -0.7071, 0)` 对应的是「x=上、y=右、z=前」，**不是** REP-103 的相机光学约定（应为 rpy `(-π/2, 0, -π/2)`）；补这条变换时**不要照抄厂商的四元数**，需要按实际安装姿态确认。
+  📌 **当前无影响**：全厂商代码里**没有任何地方对 `camera` 帧做 TF 变换**，`image_raw` 的唯一订阅者是 `/yolo`。所以 #16 现在是**潜伏**问题，真正会咬人的是我们实现 `get_target_position()`（D-007）的时候。
+- **没有稳定的 `/dev/videoN` 符号链接（#17）**：厂商 `99-usb-cam.rules` 指向不存在的脚本，规则空转。
+
+---
+
 ## 待补充的决策（尚未确定）
 
 | 议题 | 说明 |
