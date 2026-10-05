@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_camera_driver</name>
+  <version>0.1.0</version>
+  <description>
+    JetsonRobot Overlay 相机 Driver（架构分层中的 Driver 层）。
+    职责：把厂商 usb_cam 的话题收口成本项目可用的相机源——
+      1) 重新打时间戳（厂商 header.stamp 比真实采集时刻早约 0.72 s，见 D-022 / #23）；
+      2) 补发 TF 帧 camera_link0 -> camera（厂商 frame_id=camera 不在 TF 树，见 #16）。
+    本节点属 Driver 层，只做确定性的数据整形，不含任何语义/规划，LLM 不得介入。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

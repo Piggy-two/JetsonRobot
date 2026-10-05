@@ -1,0 +1,26 @@
+camera_driver:
+  ros__parameters:
+    # 输入：厂商 usb_cam 出图话题
+    input_topic: /depth_cam/rgb0/image_raw
+    # 输出：本项目收口后的相机话题（帧号已重打、frame_id 已可解析）
+    output_topic: /embodied/camera/image
+    diag_topic: /embodied/camera/diag
+
+    # TF：camera_link0 已在 URDF 中定义；camera 是本节点补上的图像帧
+    parent_frame: camera_link0
+    output_frame: camera
+    publish_static_tf: true
+    # REP-103 光学坐标系 rpy = (-pi/2, 0, -pi/2)，即 z 前 / x 右 / y 下
+    # ⚠️ 首次使用务必按 launch 文件里的方法实机目视校验后再定稿
+    tf_roll: -1.5707963267948966
+    tf_pitch: 0.0
+    tf_yaw: -1.5707963267948966
+
+    # 时间戳策略：original | receipt | corrected
+    # corrected = 收到时刻 - pipeline_latency，最接近真实曝光时刻
+    stamp_source: corrected
+    # 秒。默认取实测帧率 22.6 Hz 的一帧周期；帧率随负载变化，由 diag 持续报出实际值
+    pipeline_latency: 0.045
+
+    # 诊断话题发布周期（秒）
+    diag_period: 5.0

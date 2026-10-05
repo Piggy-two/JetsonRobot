@@ -9,7 +9,7 @@
 
 ## 1. 一句话状态
 
-**项目处于 Phase 0 硬件验收阶段：设计文档与工程维护机制已建立、磁盘阻塞已解除，仍无业务代码。2026-09-28 完成两轮硬件验收 —— 第一轮为全量接口侦察（四个 USB 口逐口识别、LiDAR 型号实测确认为 LD19、相机定性为单目，决策 D-017 / D-018）；第二轮修掉 LiDAR 的 udev 错配并重启厂商栈验证，`/scan` **实测通过**（10.00 Hz、360°、`frame_id=lidar_frame`、TF `base_link→lidar_frame` 已存在），相机按 D-019 切到厂商 `usb_cam` 分支后 `/depth_cam/rgb0/image_raw` 已出图。2026-10-05 在人工看护下完成**底盘运动验收**（决策 D-020）—— 前进/后退/左移/右移/左转/右转六向方向全部正确、轮速与运动学数值逐位吻合、`/cmd_vel` 厂商限幅（±0.2 m/s / ±0.5 rad/s）实测生效、IMU 独立佐证原地旋转为真实运动，**底盘运动链路通过**。同轮发现**底盘无指令超时保护**（停止发布后电机保持最后速度），已立为安全约束 D-020。同日第二轮做了**通信中断模拟（S2 冻结桥节点 + S3 USB 真断线）**：用**独立于桥节点的 LiDAR 转速计**测得「指令断裂期间机器人仍以 0.1373 rad/s 旋转 = 正常指令的 105%」，把「必须显式发 0」从推断升级为**直接读数**；并测得断线后 **`/odom` 照常发布 28.5 Hz 而 `imu_raw`/`battery` 停发**、**重新 bind 不自恢复（必须重启厂商栈）**、桥节点三次实测三种行为，另确认**本机没有物理急停**。以上立为 **D-021**。**同日第三轮完成相机与语音盒的硬件验收（决策 D-022）**：相机**内容端到端延迟仅约一帧（20~45 ms，用 `v4l2` 的 `brightness` 当"传感器端打光"探针实测）**，但图像 **`header.stamp` 比真实采集时刻早 0.72 s**（稳态 −741 ms、抖动仅 12 ms；已逐条排除订阅队列积压 / 仿真时钟 / 冻结的时钟换算基准 / 双发布者 / USB 带宽 / 设备档位六种解释，**机制未定**），且 **22.6 Hz 确认是主机侧丢帧**（设备在 640×480 YUYV 下**只有 30/25/20/15/10/5 六档**）；语音盒**控制串口 / 录音 / 播放三项全部实测通过**（用户确认听到提示音），`/dev/ring_mic` 缺失的根因是一条**过期 udev 路径**（规则写 `1-2.3.1`，实际设备在 `1-2.4.1`），修正后厂商 ASR 栈**正常启动**。Phase 0 现在只剩**急停链路**（需物理操作）与**相机 TF 帧收口**（#16，须在 Overlay 做）—— 但**「必须显式发 0 才停车」+「存活判据只能用 imu/battery」+「没有物理急停」+「图像时间戳不可信」这四条已彻底改变 Safety 与感知的设计前提**。
+**项目处于 Phase 0 硬件验收阶段：设计文档与工程维护机制已建立、磁盘阻塞已解除，仍无业务代码。2026-09-28 完成两轮硬件验收 —— 第一轮为全量接口侦察（四个 USB 口逐口识别、LiDAR 型号实测确认为 LD19、相机定性为单目，决策 D-017 / D-018）；第二轮修掉 LiDAR 的 udev 错配并重启厂商栈验证，`/scan` **实测通过**（10.00 Hz、360°、`frame_id=lidar_frame`、TF `base_link→lidar_frame` 已存在），相机按 D-019 切到厂商 `usb_cam` 分支后 `/depth_cam/rgb0/image_raw` 已出图。2026-10-05 在人工看护下完成**底盘运动验收**（决策 D-020）—— 前进/后退/左移/右移/左转/右转六向方向全部正确、轮速与运动学数值逐位吻合、`/cmd_vel` 厂商限幅（±0.2 m/s / ±0.5 rad/s）实测生效、IMU 独立佐证原地旋转为真实运动，**底盘运动链路通过**。同轮发现**底盘无指令超时保护**（停止发布后电机保持最后速度），已立为安全约束 D-020。同日第二轮做了**通信中断模拟（S2 冻结桥节点 + S3 USB 真断线）**：用**独立于桥节点的 LiDAR 转速计**测得「指令断裂期间机器人仍以 0.1373 rad/s 旋转 = 正常指令的 105%」，把「必须显式发 0」从推断升级为**直接读数**；并测得断线后 **`/odom` 照常发布 28.5 Hz 而 `imu_raw`/`battery` 停发**、**重新 bind 不自恢复（必须重启厂商栈）**、桥节点三次实测三种行为，另确认**本机没有物理急停**。以上立为 **D-021**。**同日第三轮完成相机与语音盒的硬件验收（决策 D-022）**：相机**内容端到端延迟仅约一帧（20~45 ms，用 `v4l2` 的 `brightness` 当"传感器端打光"探针实测）**，但图像 **`header.stamp` 比真实采集时刻早 0.72 s**（稳态 −741 ms、抖动仅 12 ms；已逐条排除订阅队列积压 / 仿真时钟 / 冻结的时钟换算基准 / 双发布者 / USB 带宽 / 设备档位六种解释，**机制未定**），且 **22.6 Hz 确认是主机侧丢帧**（设备在 640×480 YUYV 下**只有 30/25/20/15/10/5 六档**）；语音盒**控制串口 / 录音 / 播放三项全部实测通过**（用户确认听到提示音），`/dev/ring_mic` 缺失的根因是一条**过期 udev 路径**（规则写 `1-2.3.1`，实际设备在 `1-2.4.1`），修正后厂商 ASR 栈**正常启动**。Phase 0 现在只剩**急停链路**（需物理操作）与**相机 TF 帧收口**（#16，须在 Overlay 做）—— 但**「必须显式发 0 才停车」+「存活判据只能用 imu/battery」+「没有物理急停」+「图像时间戳不可信」这四条已彻底改变 Safety 与感知的设计前提**。**同日第四轮建起 Overlay Workspace（`embodied_agent_ws`，建在仓库内）并落地本项目第一个业务代码节点 `embodied_camera_driver`（决策 D-023）**：在同一个 Driver 内收口两项相机软件欠账 —— #23 **重新打时间戳**（三档策略，默认 `receipt − 45 ms`）与 #16 **补发 TF `camera_link0 → camera`**；并**独立复核**了第三轮的结论（时间戳陈旧量均值 **736 ms** / 最大 747 ms，与第三轮亮度探针的 −741 ms **相互印证**；输出帧率 **20.7 → 20.9 Hz ≈ 1:1**；TF `base_footprint → base_link → camera_link0 → camera` **端到端可解析**）。**项目自此不再是「只有文档、没有业务代码」。** 为此把仓库根那份厂商源码副本由 `src/src/` 改名为 `vendor_reference/`，并修掉 `.gitignore` 里一条会**静默吞掉工作区源码**的裸 `src/` 规则（详见 `docs/DEV_NOTES.md`）。
 
 ---
 
@@ -26,7 +26,7 @@
 | 基线环境（ROS2 / Jetson / 磁盘 / 环境加载链） | 🟢 已完成 | ROS2 Humble、Jetson Orin（8GB，内存 7.4Gi）、磁盘已扩容至 116G；环境加载链与机型配置位置已记录（`.zshrc` → `.robotrc` → `.typerc`，原已知问题 #6 已关闭） |
 | 底盘与安全（`ros_robot_controller` / `controller` / `kinematics` / `servo_controller`） | 🟢 **运动已通过**，安全侧进行中 | **2026-10-05 人工看护下完成六向运动验收**：方向全部正确、轮速与运动学逐位吻合、`/cmd_vel` 限幅实测生效、IMU 佐证真实运动（见 §7）。**同日完成通信中断模拟**：LiDAR 独立测得指令断裂时底盘仍以 **105% 速率**继续旋转（#18 / D-020），断线后 `/odom` 照发而 `imu_raw`/`battery` 停发、重新 bind 不自恢复（#21 / D-021）。⚠️ 仍未测：**急停链路 / 遥控优先级**；且**本机无物理急停**（#22 / D-021） |
 | LiDAR 与避障 | 🟢 **已完成（通过）** | 型号实测确认为 **LD19**，设备健康（CRC 99.9%、4992 点/秒，见 D-018）。原「无 `/scan`」根因是 udev 把 `/dev/lidar` 指向了底盘串口，**已修复并重启验证通过**：`/scan` **10.00 Hz**、360°、502~505 点/帧、有效回波 93.5~97.0%、`frame_id=lidar_frame`、TF `base_link→lidar_frame`（静态 `[0.011, 0, 0.136]`）存在。实测记录见 §7 |
-| 相机与视觉 | 🟡 **硬件已通过，TF 帧待补** | 实测为**单目** UVC 摄像头（icSpring `32e6:9005`，YUYV 640×480，`/dev/video0`），全系统仅此一个摄像头（视觉基线 **D-017**）。已按 **D-019** 把 `.typerc` 切到厂商 `usb_cam` 分支 → `/depth_cam/rgb0/image_raw` 由 0 个发布者变为 **1 个**（`/yolo` 是唯一订阅者）。**2026-10-05 第三轮实测（D-022）**：① **内容端到端延迟仅约一帧（20~45 ms）**，硬件可用；② ⚠️ **`header.stamp` 比真实采集时刻早 0.72 s**（稳态 −741 ms、抖动 12 ms，机制未定，六种解释已排除）；③ 22.6 Hz 确认是**主机侧丢帧**（设备仅 30/25/20/15/10/5 六档）；④ 图像 `frame_id=camera` 不在 TF 树中（#16，**当前无消费者，属潜伏问题**） |
+| 相机与视觉 | 🟢 **硬件已通过 + Driver 已收口**（仅剩 TF 朝向待目视校验） | 实测为**单目** UVC 摄像头（icSpring `32e6:9005`，YUYV 640×480，`/dev/video0`），全系统仅此一个摄像头（视觉基线 **D-017**）。已按 **D-019** 把 `.typerc` 切到厂商 `usb_cam` 分支 → `/depth_cam/rgb0/image_raw` 由 0 个发布者变为 **1 个**（`/yolo` 是唯一订阅者）。**2026-10-05 第三轮实测（D-022）**：① **内容端到端延迟仅约一帧（20~45 ms）**，硬件可用；② ⚠️ **`header.stamp` 比真实采集时刻早 0.72 s**（稳态 −741 ms、抖动 12 ms，机制未定，六种解释已排除）；③ 22.6 Hz 确认是**主机侧丢帧**（设备仅 30/25/20/15/10/5 六档）；④ 图像 `frame_id=camera` 不在 TF 树中（#16，**当前无消费者，属潜伏问题**）。**2026-10-05 第四轮（D-023）**：① ② ④ 已在 Overlay Driver `embodied_camera_driver` 中**收口**——重新打时间戳（三档，默认 `receipt − 45 ms`）、补发 TF `camera_link0 → camera`（REP-103 光学）；**独立复核**陈旧量均值 736 ms、输出 20.9 Hz ≈ 1:1、TF `base_footprint → ... → camera` 端到端可解析。**仅剩 TF 朝向需实机目视校验一次** |
 | 语音与麦克风（`xf_mic_asr_offline`） | 🟢 **硬件已通过**，ASR 集成未做 | 已知配置 `MIC_TYPE=xf`（已设在 `~/.zshrc`）/ `ASR_MODE=online`（⚠️ 在线 ASR，断网不可用）。**2026-10-05 第三轮实测（D-022）**：控制串口 `/dev/ttyCH341USB1`（`1-2.4.1`）可用；音频 card 0（`0c76:161f`，`1-2.4.2`）**录音 + 播放均通过**（用户确认听到 440 Hz 提示音，采集侧削顶 0%）；`/dev/ring_mic` 根因是**过期 udev 路径**（规则写 `1-2.3.1`，实际 `1-2.4.1`），**已修正**，修正后 `mic_init.launch.py` 的 `awake_node.py` / `asr_node.py` / `voice_control` **正常启动** |
 | SLAM / 导航 / 系统联调 | ⬜ 未开始 | 依赖上述全部通过 |
 | **接口清单交付物** | 🟡 进行中 | 底盘 / 相机 / LiDAR 已填入实测值；**LiDAR 与底盘（运动）已可标"通过"**，语音与导航待补 |
@@ -54,8 +54,10 @@
 
 ## 4. 正在进行
 
-- **无正在进行的代码开发。** 当前处于"文档与基础设施就绪、硬件验收收尾"的节点：**LiDAR / 底盘运动 / 通信中断 / 相机硬件 / 语音盒硬件均已通过**。剩余两块：① **底盘安全侧 —— 急停链路**（需物理操作；遥控优先级用户已降级）；② **相机 TF 帧收口（#16）** —— 需先建立 Overlay Workspace，因为补救变换**不能写进厂商仓库**。
-- **⚠️ 两条待继承的软件欠账**：图像 `header.stamp` 早 0.72 s（D-022，须在自建 Driver 层重新打时间戳）；`/dev/video0` 无稳定符号链接（#17，须在 Overlay 自建 udev 规则）。
+- **Overlay Workspace 已建立，并落地第一个业务代码节点。** `embodied_agent_ws/` 建在**仓库内**，内含 `embodied_camera_driver`（Driver 层，D-023）：在同一个节点内收口 #23（重新打时间戳）与 #16（补发 TF `camera_link0 → camera`）。已编译、已实跑、已实测验证（详见 §7 与 DEVELOPMENT_LOG 第四轮）。**项目由此进入「有业务代码」阶段。**
+- **硬件侧只剩一项**：**底盘安全侧 —— 急停链路**（需物理操作；遥控优先级用户已降级）。
+- **⚠️ 仍待继承的欠账**：① **TF 朝向需实机目视校验一次**（D-023 决策 2 的唯一未闭合项）；② `/dev/video0` 无稳定符号链接（#17，须在 Overlay 自建 udev 规则）；③ 时间戳修正量 `pipeline_latency`（默认 45 ms）待实测校准；④ 语音**软件侧**（ASR 文本输出 / 本地安全指令解析 / 断网降级）未验收。
+- **下一步的第一件事**：见 §6 —— 定 **Phase 1（Driver / Primitive）的接入面**，或者先做**语音软件侧验收**。
 
 ---
 
@@ -78,14 +80,14 @@
 | 13 | ~~`.typerc` 机型配置与实机硬件不符~~ **已解决** | ✅ 已解除 | `~/ros2_ws/.typerc:9` 原为 `DEPTH_CAMERA_TYPE=aurora`（期望深相机），与实机的单目 USB 摄像头不符。逐项核对：`LIDAR_TYPE=LD19` ✅ 一致；`DEPTH_CAMERA_TYPE` ❌ 不符。厂商 `usb_cam` 分支参数（`/dev/video0` + `yuyv` + 640×480）与实机**逐项吻合**。**2026-09-28 按用户决策改为 `usb_cam`**（备份 `.typerc.bak-20260928`）并重启验证出图，决策与影响见 **D-019** |
 | 14 | ~~副 Hub 上的 CH340（`ttyCH341USB1`）功能未定~~ **已解决** | ✅ 已解除 | **2026-10-05 实测（D-022）**：确认 `/dev/ttyCH341USB1`（USB 路径 **`1-2.4.1`**，`1a86:7523` CH340）**就是语音盒（讯飞环形麦）的控制串口** —— 可正常打开、无进程占用（`ttyCH341USB0` 归雷达），且同一 Hub 的口 2（`1-2.4.2`）是它的音频接口 `0c76:161f`。**这两条恰好就是原先列的两个"决定性验证"中的第 ② 条**（改规则后跑厂商自检），第 ① 条（拔插）因此不需要做了。`/dev/ring_mic` 建不出来的根因是 `/etc/udev/rules.d/xf_mic.rules` 第 4 行写死 `KERNELS=="1-2.3.1:1.0"`（**该口现在是相机**），改为 `1-2.4.1:1.0`（备份 `xf_mic.rules.bak-20261005`）后符号链接正确建立，厂商 `mic_init.launch.py` 的 `awake_node.py`/`asr_node.py`/`voice_control` 正常启动 |
 | 15 | ~~相机话题速率远低于设备侧速率~~ **已定性：主机侧丢帧，且速率随负载变化** | ✅ 已定性 | **2026-10-05 实测（D-022）**：设备在 640×480 YUYV 下 `--list-formats-ext` **只有 30/25/20/15/10/5 六档**，`--get-parm` 明确协商 **30.000 fps** —— 因此实测速率**不在设备的任何档位上** → **是主机侧丢帧**（`uvcvideo.nodrop=0`，缓冲区不够时整帧丢弃），既不是设备能力、也不是 Python 订阅端解析慢（用**驱动时间戳**算，间隔 43.77~48.03 ms 高度均匀，0/453 个间隔 >50 ms；`camera_info` 这种极小消息同为 22.6 Hz）。⚠️ **但速率随负载变化**：本轮 22.6 Hz，而 2026-09-28 同一话题四次实测为 9.8~11.5 Hz（约 2 倍关系，原因未定）。→ **Phase 4 定帧率预算时既不得假设 30 fps，也不得假设速率恒定**，须在自己的 Driver 层实测并做降级设计 |
-| 16 | **图像 `frame_id=camera` 不在 TF 树中** | 🟡 **潜伏问题**，Phase 4 前置 | `usb_cam_param.yaml` 的 `frame_id: "camera"`，而 TF 树中的相机帧是 `camera_link0`（`base_link → camera_link0`）。**2026-10-05 根因定位（D-022）**：`ascamera.xacro` **只定义 `camera_link0`**（`xyz=[0.057373, 7.9091e-05, 0.091864]`，`rpy=0 0 0`），URDF 里**不存在** `camera` / `ascamera_camera_link_0` / `depth_cam_color_frame`；厂商 `depth_camera.launch.py` 里那个名为 `depth_cam_base_link` 的 static_transform_publisher **发布的正是这两个都不存在的帧**（复制粘贴残留，丢了 `ascamera.launch.py` 参数的前半段），另留下一条孤立 TF `ascamera_camera_link_0 → depth_cam_color_frame`。📌 **当前无影响**：全厂商代码中**没有任何地方对 `camera` 帧做 TF 变换**，`image_raw` 的唯一订阅者是 `/yolo` → 属**潜伏问题**，会在实现 D-007 的 `get_target_position()` 时爆发。**补救：补发 `camera_link0 → camera`，且必须落在 Overlay，不得修改厂商文件**（CLAUDE.md §2/§8）。⚠️ 厂商那条例子的四元数 `(-0.7071, 0, -0.7071, 0)` 对应「x=上 / y=右 / z=前」，**不是** REP-103 相机光学约定（应为 rpy `(-π/2, 0, -π/2)`），**不要照抄**，须按实际安装姿态确认 |
+| 16 | **图像 `frame_id=camera` 不在 TF 树中** | ✅ **已修**（D-023；仅 TF 朝向待实机校验） | `usb_cam_param.yaml` 的 `frame_id: "camera"`，而 TF 树中的相机帧是 `camera_link0`（`base_link → camera_link0`）。**2026-10-05 根因定位（D-022）**：`ascamera.xacro` **只定义 `camera_link0`**（`xyz=[0.057373, 7.9091e-05, 0.091864]`，`rpy=0 0 0`），URDF 里**不存在** `camera` / `ascamera_camera_link_0` / `depth_cam_color_frame`；厂商 `depth_camera.launch.py` 里那个名为 `depth_cam_base_link` 的 static_transform_publisher **发布的正是这两个都不存在的帧**（复制粘贴残留，丢了 `ascamera.launch.py` 参数的前半段），另留下一条孤立 TF `ascamera_camera_link_0 → depth_cam_color_frame`。📌 **当前无影响**：全厂商代码中**没有任何地方对 `camera` 帧做 TF 变换**，`image_raw` 的唯一订阅者是 `/yolo` → 属**潜伏问题**，会在实现 D-007 的 `get_target_position()` 时爆发。**补救：补发 `camera_link0 → camera`，且必须落在 Overlay，不得修改厂商文件**（CLAUDE.md §2/§8）。⚠️ 厂商那条例子的四元数 `(-0.7071, 0, -0.7071, 0)` 对应「x=上 / y=右 / z=前」，**不是** REP-103 相机光学约定（应为 rpy `(-π/2, 0, -π/2)`），**不要照抄**，须按实际安装姿态确认。**2026-10-05 第四轮已修（D-023）**：Overlay Driver `embodied_camera_driver` 补发静态 TF `camera_link0 → camera`，采用 **REP-103 光学约定**（rpy = −π/2, 0, −π/2）；实测 `base_footprint → base_link → camera_link0 → camera` **端到端可解析**（Translation `[0.057, 0, 0.120]`）。⚠️ **唯一未闭合项：`camera_link0` 的实际朝向未实机目视校验**（URDF `rpy=0` 表达不了机械安装），方法见 launch 文件注释，若不符用 `tf_roll/tf_pitch/tf_yaw` 参数修正 |
 | 17 | **厂商 `99-usb-cam.rules` 指向不存在的脚本** | ⬜ 非阻塞 | `/etc/udev/rules.d/99-usb-cam.rules:3` 的 `RUN+="/home/ubuntu/.dtb/.link_yuyv_camera.sh"` 指向**不存在的脚本**（`~/.dtb/` 目录不存在）→ 规则空转，**系统里没有稳定的相机符号链接**（对比雷达有 `/dev/lidar`）。当前 `/dev/video0` 只是枚举顺序的结果，**多摄像头或重插后不保证稳定**。本项目若需固定相机路径，应在 Overlay 自建 udev 规则（不改厂商文件） |
 | 18 | **底盘无指令超时保护（停车必须显式发 0）** | 🔴 **安全设计前提** | **2026-10-05 实测**：向 `/cmd_vel` 发 1.5 s 速度后**完全停止发布**，4 s 内 `set_motor` 无新消息，但 IMU 振荡幅度仍为 **±0.067 rad/s**（对比发 0 时仅 ±0.0015）→ **电机保持最后一条速度指令继续转**。源码佐证：`set_motor_speed()` 报文不带 duration，`ros_robot_controller_node` 无超时/看门狗。**影响**：Safety Runtime 的急停**不能**依赖「上游停止发指令」，必须**主动持续发 0**，且要有独立发布通道。已立为 **D-020**，验收工装 `tools/phase0_chassis_motion_acceptance.py` 按此实现。**同日第二轮用 LiDAR 转速计直接读数复核**：冻结桥节点 7 s（指令发不进板子）期间底盘仍以 **0.1373 rad/s** 旋转 = 正常指令 0.1308 rad/s 的 **105%**，总转角 0.9369 rad ≈ 53.7°；而显式发 0 后立刻落回 **0.0064 rad/s** |
 | 19 | **`/controller/cmd_vel` 完全无限幅** | 🟡 已规避 | `odom_publisher.cmd_vel_callback`（`/controller/cmd_vel` 路径）**不做任何速度钳制**，而 `app_cmd_vel_callback`（`/cmd_vel` 路径）钳到 ±0.2 m/s / ±0.5 rad/s。5 个厂商 app 全在无限幅那条上。本项目按 **D-016** 只走 `/cmd_vel`，故已规避；但**记录在案**：任何时候误发 `/controller/cmd_vel` 都没有第二道限幅 |
 | 20 | ~~急停 / 遥控优先级 / 通信中断停车均未测~~ **通信中断已完成，急停与遥控优先级待测** | 🟡 Phase 0 待办 | **2026-10-05 第二轮完成「通信中断」模拟**（S2 冻结桥节点 + S3 USB 真断线，见 #18 / #21 / **D-021**）。**仍未测**：① **急停链路**（`/ros_robot_controller/button` 物理按键行为、断电响应）；② **遥控优先级**（`/sbus` / `/joy` 与 `/cmd_vel` 的优先级）。两者均需物理操作。⚠️ **遥控优先级一项用户已明确表示当前无遥控需求**，可降级 |
 | 21 | **底盘断线后不自恢复；且 `/odom` 会给出「在线」假象** | 🔴 **Safety 设计前提** | **2026-10-05 S3 实测**：`unbind` 底盘 USB 口 `1-2.2` 后 —— `/odom` **照常发布 28.529 Hz**（纯死推算）而 `/ros_robot_controller/imu_raw`、`battery` **完全停发**；桥节点进程三轮实测**三种行为**（苟活 / 退出 / 静默存活）。**仅重新 `bind` 不会自恢复**（PID 不变、遥测仍无），必须 `sudo systemctl restart start_app_node.service`（重启后新 PID、`/odom` 回 30.000 Hz、遥测恢复，约 6~18 s）。→ **存活判据只能用 `imu_raw` / `battery`**，绝不能用 `/odom` 或 `pgrep`。已立为 **D-021** |
 | 22 | **本机没有物理急停** | 🔴 **安全前提** | **2026-10-05 源码实证**：`~/wifi_manager/button_scan.py`（PID 697，开机自启，同样持有底盘串口）读 Jetson GPIO 25 / GPIO 4，但其中的 `os.system('sudo halt')` **被注释掉**；KEY2 长按只调 `board.set_buzzer()`。`/ros_robot_controller/button` 话题存在但**行为未验证**。→ **唯一停车手段是软件持续发 0，或直接断电**。任何运动测试都必须有人在场且**能直接断电**。已记入 **D-021** |
-| 23 | **图像 `header.stamp` 比真实采集时刻早 0.72 s** | 🔴 **感知设计前提** | **2026-10-05 实测（D-022）**：用 `v4l2` 的 `brightness`（ISP 数字偏移、逐帧立即生效）当"传感器端打光"探针，在 `t_cmd` 改变亮度 —— **携带新内容的帧在 `t_cmd+111~135 ms`（`image_raw`）/ `+19~44 ms`（`image_compressed`）到达，但它的 `header.stamp` 落在 `t_cmd−604~716 ms`** → **内容新鲜、时间戳陈旧**。稳态偏移 raw **−741.2 ms**（抖动 12.4 ms / 306 帧）、compressed **−737.8 ms**（抖动 21.9 ms / 340 帧）。已逐条排除：订阅队列积压（全新 `depth=1` 订阅者首条即 −738 ms）、仿真时钟（`use_sim_time:false`、无 `/clock`）、启动时冻结的时钟换算基准（服务启动至今 `(实时−单调)` 仅变 0.04 s）、双发布者（实测 Publisher count = 1）、USB 带宽（dmesg 无错）、设备档位（设备只有 6 档，无 22.6）。**机制未定** —— 本机 `usb_cam` 只有 stripped 二进制、无源码。**影响**：任何图像时间戳融合（TF 查询 / 与 `/odom` 对齐 / 目标位置）都会偏 0.72 s（0.2 m/s 下 = 14 cm）。**处置：在自建 Driver 层重新打时间戳**，与机制无关 |
+| 23 | **图像 `header.stamp` 比真实采集时刻早 0.72 s** | ✅ **已收口**（D-023；机制仍未定，但下游已不受影响） | **2026-10-05 实测（D-022）**：用 `v4l2` 的 `brightness`（ISP 数字偏移、逐帧立即生效）当"传感器端打光"探针，在 `t_cmd` 改变亮度 —— **携带新内容的帧在 `t_cmd+111~135 ms`（`image_raw`）/ `+19~44 ms`（`image_compressed`）到达，但它的 `header.stamp` 落在 `t_cmd−604~716 ms`** → **内容新鲜、时间戳陈旧**。稳态偏移 raw **−741.2 ms**（抖动 12.4 ms / 306 帧）、compressed **−737.8 ms**（抖动 21.9 ms / 340 帧）。已逐条排除：订阅队列积压（全新 `depth=1` 订阅者首条即 −738 ms）、仿真时钟（`use_sim_time:false`、无 `/clock`）、启动时冻结的时钟换算基准（服务启动至今 `(实时−单调)` 仅变 0.04 s）、双发布者（实测 Publisher count = 1）、USB 带宽（dmesg 无错）、设备档位（设备只有 6 档，无 22.6）。**机制未定** —— 本机 `usb_cam` 只有 stripped 二进制、无源码。**影响**：任何图像时间戳融合（TF 查询 / 与 `/odom` 对齐 / 目标位置）都会偏 0.72 s（0.2 m/s 下 = 14 cm）。**处置：在自建 Driver 层重新打时间戳**，与机制无关。**2026-10-05 第四轮已在该 Driver 中收口（D-023）**：`stamp_source` 三档（`original` / `receipt` / `corrected`），默认 `corrected = receipt − 45 ms`；**独立复核**陈旧量均值 **736 ms** / 最大 747 ms（与上表 −741.2 ms 相互印证，代码路径完全不同）。⚠️ **机制仍未定**（本机 `usb_cam` 只有 stripped 二进制，无法再往下定位），但**下游已不受影响**；修正量 `pipeline_latency` 待实测校准 |
 
 ---
 
@@ -93,7 +95,8 @@
 
 **优先级从高到低：**
 
-1. **建立 Overlay Workspace（`embodied_agent_ws`）** —— **所有后续开发的前置**。Phase 1 的 Driver 层、#16 的相机 TF 补救、#23 的图像重新打时间戳、#17 的相机 udev 规则，全都要落在这里（**不得修改厂商 `~/ros_ws`**，CLAUDE.md §2/§8）。⚠️ **需先与用户确认工作区位置**（仓库内 `ros2_ws/` 还是仓库外 `~/embodied_agent_ws`）。
+1. ~~建立 Overlay Workspace（`embodied_agent_ws`）~~ ✅ **2026-10-05 已完成** —— 建在**仓库内**，已落地首个业务代码节点 `embodied_camera_driver`（D-023）。Phase 1 的 Driver 层、#16 的 TF 补救、#23 的重新打时间戳、#17 的相机 udev 规则，今后都落在这里（**不得修改厂商 `~/ros2_ws`**，CLAUDE.md §2/§8）。
+   - **遗留两个一次性小动作**：① **实机目视校验 TF 朝向**（D-023 决策 2 唯一未闭合项，方法见 launch 文件注释）；② **用 `/embodied/camera/diag` 的实测读数校准 `pipeline_latency`**（当前默认 45 ms 是估计值）。
 2. **底盘安全侧验收**（**Phase 0 剩下的硬骨头**，需物理操作 + 人工看护）：
    - ~~通信中断停车~~ ✅ **2026-10-05 已完成**（S2 冻结 + S3 真断线；结论见 #18 / #21 / **D-020 / D-021**）。**注**：「运动中拔线」这一更极端场景**刻意未做**（按构造不安全，理由见 D-020）。
    - **急停链路**（**当前优先级最高，也是 Phase 0 唯一剩下的硬件项**）—— `/ros_robot_controller/button` 的物理按键行为，以及断电响应。⚠️ 已知本机**没有物理急停**（#22），此项的核心是**确认到底有没有可用的硬件级停车手段**。
@@ -101,7 +104,7 @@
    > 前置条件已明确：5 个厂商 app **默认关闭**（#10，2026-10-05 复测仍静默），开测前确认其未激活即可。运动测试一律保留限速与看护。
    >
    > 🔴 **四条已定的硬约束（Phase 1+ 设计时不得违反）**：① 停车必须**主动持续发 0**（D-020）；② 存活判据**只能用 `imu_raw` / `battery`**，不得用 `/odom` 或进程状态，断线重连要**本项目自己实现**（D-021）；③ **图像 `header.stamp` 不可信**（早 0.72 s），须重新打时间戳（D-022 / #23）；④ 相机帧率**既非 30 也非恒定**，须实测并做降级（#15）。
-3. ~~相机链路收口~~ ✅ **已定性**（2026-10-05）：速率 = 主机侧丢帧且随负载变化（#15）、TF 帧根因定位（#16）、时间戳偏移量化（#23）。**遗留的是"做法"不是"原因"** —— 待 Overlay 建立后补 `camera_link0 → camera` 与重新打时间戳。**届时再决定 D-019 留的口子：继续用厂商 `usb_cam`，还是在 Overlay 自建 Driver。**
+3. ~~相机链路收口~~ ✅ **已完成**（2026-10-05）：前一阶段「定性」（速率 = 主机侧丢帧且随负载变化 #15、TF 帧根因定位 #16、时间戳偏移量化 #23）**已由第四轮的 Driver 落地为「做法」** —— `embodied_camera_driver` 补 `camera_link0 → camera` 并重新打时间戳（D-023），**D-019 留的口子已闭合：确认在 Overlay 自建 Driver**。
 4. ~~确认 `ttyCH341USB1` = 讯飞环形麦~~ ✅ **已完成**（#14 / D-022）：功能确认、udev 规则修正、`/dev/ring_mic` 建立、厂商 ASR 栈正常启动。
 5. **语音验收（软件侧）** —— ASR 文本输出、"停 / 急停 / 取消任务"的**本地解析链路（必须绕过 LLM）**。⚠️ `ASR_MODE=online` 是在线 ASR，需确认**断网时的降级行为**（D-006 要求安全指令不依赖网络）。硬件侧已通过（D-022）。
 6. **产出接口清单** —— Phase 0 的交付物（见 §7；底盘 / 相机 / LiDAR / 语音均有实测值）。
@@ -113,13 +116,14 @@
 
 ## 7. 接口清单（Phase 0 交付物 · 填写中）
 
-> 2026-09-23 只读基线实测填写，2026-09-28 补齐 LiDAR / 相机 / 语音的设备级实测值，2026-10-05 补齐底盘运动、通信中断、相机与语音盒实测值。**"验收结果"列只有实机测试通过后才允许标"通过"** —— 目前 **LiDAR 已标"通过"**（2026-09-28），**底盘已标"运动通过"但安全侧未收口**（2026-10-05），**相机与语音已标"硬件通过"但软件侧收口未做**（2026-10-05），导航未通过。
+> 2026-09-23 只读基线实测填写，2026-09-28 补齐 LiDAR / 相机 / 语音的设备级实测值，2026-10-05 补齐底盘运动、通信中断、相机与语音盒实测值，**同日第四轮补入 Overlay 首个 Driver（`embodied_camera_driver`）的接口与实测值**。**"验收结果"列只有实机测试通过后才允许标"通过"** —— 目前 **LiDAR 已标"通过"**（2026-09-28），**底盘已标"运动通过"但安全侧未收口**（2026-10-05），**相机与语音已标"硬件通过"但软件侧收口未做**（2026-10-05），导航未通过。
 
 | 模块 | 已确认驱动/包 | 启动入口 | 输入接口 | 输出接口 | TF / 设备路径 | 验收结果 |
 |---|---|---|---|---|---|---|
 | 底盘 | ✅ `ros_robot_controller`（硬件桥）+ `controller`/`odom_publisher`（运动学）+ `servo_controller` | `ros2 launch bringup bringup.launch.py`（实测在运行） | ✅ **`/cmd_vel`**（`geometry_msgs/Twist`，**厂商限幅 ±0.2 m/s / ±0.5 rad/s**）→ `odom_publisher` → `/ros_robot_controller/set_motor`（`MotorsState`）。⚠️ `/controller/cmd_vel` **无限幅且 5 个 app 争用**，不用（#19 / D-016） | ✅ `/odom_raw` → `ekf_node` → `/odom`（**实测 30.0 Hz**，抖动 <1ms）；`/ros_robot_controller/{battery,button,imu_raw,joy,sbus}` | 设备 `/dev/rrc`（`ttyACM0`）；⬜ TF 帧待确认 | ✅ **运动通过**（2026-10-05，数据见下）；⚠️ 急停/遥控/通信中断未测（#20） |
 | LiDAR | ✅ **LD19**（`ldlidar_stl_ros2`，230400） | `peripherals/launch/include/ldlidar_LD19.launch.py`（由 `LIDAR_TYPE=LD19` 选择） | ✅ `/dev/lidar` → `ttyCH341USB0`（Hub 口 `1-2.1`） | ✅ `/scan`（`sensor_msgs/LaserScan`），**实测 10.00 Hz** | 设备 `/dev/lidar`；`frame_id=lidar_frame`；TF `base_link → lidar_frame` 静态 `[0.011, 0, 0.136]` | ✅ **通过**（2026-09-28 实测，数据见下） |
-| 相机 | 单目 UVC（内核 `uvcvideo`）+ 厂商 `usb_cam` 分支 | 厂商 `peripherals/launch/depth_camera.launch.py`（`DEPTH_CAMERA_TYPE=usb_cam` → `usb_cam_node_exe`，见 D-019） | ✅ `/dev/video0`（YUYV 640×480；设备协商 30 fps 但**主机侧实际约 22.6 Hz 且随负载变化**，#15） | ✅ `/depth_cam/rgb0/image_raw`（**1 个发布者**，`encoding=yuv422_yuy2`，唯一订阅者 `/yolo`）+ `/depth_cam/rgb0/camera_info`；**端到端延迟 ≈ 一帧（20~45 ms）** | 设备 `/dev/video0`（**无稳定符号链接**，#17）；图像 `frame_id=camera`（**不在 TF 树中**，#16） | 🟡 **硬件通过**（2026-10-05，D-022）；⚠️ 时间戳早 0.72 s（#23）、TF 帧缺失（#16）待 Overlay 收口 |
+| 相机 | 单目 UVC（内核 `uvcvideo`）+ 厂商 `usb_cam` 分支 | 厂商 `peripherals/launch/depth_camera.launch.py`（`DEPTH_CAMERA_TYPE=usb_cam` → `usb_cam_node_exe`，见 D-019） | ✅ `/dev/video0`（YUYV 640×480；设备协商 30 fps 但**主机侧实际约 22.6 Hz 且随负载变化**，#15） | ✅ `/depth_cam/rgb0/image_raw`（**1 个发布者**，`encoding=yuv422_yuy2`，唯一订阅者 `/yolo`）+ `/depth_cam/rgb0/camera_info`；**端到端延迟 ≈ 一帧（20~45 ms）** | 设备 `/dev/video0`（**无稳定符号链接**，#17）；图像 `frame_id=camera` → **Driver 已补 TF `camera_link0 → camera`**（D-023） | 🟢 **硬件通过 + Driver 已收口**（2026-10-05，D-022 / D-023）；仅 TF 朝向待实机目视校验 |
+| **相机 Driver**（Overlay） | ✅ `embodied_camera_driver`（本项目 Driver 层，D-023） | `ros2 launch embodied_camera_driver camera_driver.launch.py`（**须在 bash 中**先 source 厂商再 source 本 Overlay） | ✅ `/depth_cam/rgb0/image_raw`（订阅 BEST_EFFORT / depth=1，只取最新帧） | ✅ **`/embodied/camera/image`**（帧号已重打，`frame_id=camera`，**实测 20.9 Hz ≈ 1:1 透传**）+ **`/embodied/camera/diag`**（`Float64MultiArray` = `[帧数, 帧率Hz, 原始戳陈旧量ms, 施加修正量ms, 最大陈旧量ms]`） | ✅ **TF `camera_link0 → camera`**（静态，REP-103 光学 rpy `(-π/2, 0, -π/2)`）；实测 `base_footprint → base_link → camera_link0 → camera` **端到端可解析** | 🟢 **已通过**（2026-10-05，D-023）；⚠️ TF 朝向待目视校验 |
 | 语音 | ✅ `xf_mic_asr_offline`（`awake_node.py` / `asr_node.py` / `voice_control`，修正 udev 后实测可正常启动） | `ros2 launch xf_mic_asr_offline mic_init.launch.py`（`MIC_TYPE=xf` 设在 `~/.zshrc`） | `/dev/ring_mic` → `ttyCH341USB1`（Hub 口 `1-2.4.1`，控制串口）+ 声卡 0（`1-2.4.2`，48 kHz S16_LE 2ch 采集） | ASR 文本 / 唤醒事件（⬜ 软件侧未验收）；播放已实测 | `MIC_TYPE=xf` / `ASR_MODE=online`（⚠️ 断网不可用） | 🟢 **硬件通过**（2026-10-05，D-022：串口 / 录音 / 播放三项）；⬜ 软件侧验收未做 |
 | 导航 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ 未测 |
 
@@ -271,8 +275,8 @@ USB3 侧（bus 2）的 4 口 Hub 上无任何设备
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| **Phase 0** | 环境与硬件启动验收 + 接口清单 | 🚧 **进行中** |
-| Phase 1 | Driver / Primitive（Camera / Motor / LiDAR Driver） | ⬜ 未开始 |
+| **Phase 0** | 环境与硬件启动验收 + 接口清单 | 🚧 **进行中**（硬件仅剩**急停链路**；相机 / 语音**软件侧**收口进行中） |
+| **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅ 已落地**（`embodied_camera_driver`，D-023）；Motor / LiDAR Driver 未开始 |
 | Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | ⬜ 未开始 |
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
 | Phase 4 | Semantic Skills（`search_object` / `inspect_area` / `patrol_route` / `return_home`） | ⬜ 未开始 |
@@ -293,6 +297,16 @@ git status && git log --oneline -10
 
 # 3. 确认环境
 echo $ROS_DISTRO && df -h /
+
+# 4. 加载环境（必须在 bash 里；Overlay 要用 __在厂商之后__ 的顺序 source）
+bash -c 'source /opt/ros/humble/setup.bash
+         source ~/ros2_ws/install/setup.bash
+         source ~/JetsonRobot/embodied_agent_ws/install/setup.bash
+         ros2 pkg list | grep embodied_camera_driver'
 ```
 
 然后从本文件「第 6 节 下一步计划」继续。
+
+> ℹ️ 若业务代码（`embodied_agent_ws/src/`）有改动，先 `colcon build --symlink-install`。
+> 若 `git status` 看不到自己刚写的源码，检查是否被 `.gitignore` 吞掉
+> （`git check-ignore -v --no-index <路径>`），参见 `docs/DEV_NOTES.md` 坑 4。

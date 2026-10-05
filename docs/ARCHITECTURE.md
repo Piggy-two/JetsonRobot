@@ -90,6 +90,7 @@ Jetson Orin（L4T R36.4.3 / JetPack 6.x）是中央计算节点，承担：
 | 本地轻量 LLM | 后期加入，用于简单语言理解 / Tool Calling / 离线模式 | 📋 第一版不做 |
 | 云端 LLM 调用 | 复杂任务规划、多步骤推理、异常处理 | 📋 |
 | TensorRT 视觉推理 | GStreamer → CUDA → TensorRT → YOLO → Tracker | 📋 |
+| 相机 Driver | `embodied_camera_driver`（Overlay，Driver 层）：收口厂商相机源——**重新打时间戳**（原始戳早 0.72 s） + **补发 TF 帧** `camera_link0 → camera`。只做确定性数据整形，不含语义/规划 | ✅ 已实现（2026-10-05） |
 | ROS2 | Humble | ✅ |
 | SLAM / Navigation | `slam` / `gmapping` / `navigation` / `teb_local_planner` | ✅ 包存在，❓ 待实机验收 |
 | Skill Runtime | Skill 注册 / 参数校验 / 执行 / 状态管理 / Cancel / Timeout / Event 上报 | 📋 |
@@ -366,14 +367,28 @@ Understand → Plan → Select Skill → Execute → Observe Event → Evaluate 
          peripherals,simulations,slam,xf_mic_asr_offline, ...}
 ~/third_party/        ✅ 6.4G，OpenCV / YDLidar-SDK / orbbec_ws / rtabmap_ws /
                          sherpa-onnx / yolo / aurora_ws / gmapping_ws ...
-~/JetsonRobot/        ← 本仓库（文档 + 未来的 overlay 代码）
-
-embodied_agent_ws/    📋 计划：本项目 Overlay Workspace，避免修改厂商包
+~/JetsonRobot/        ← 本仓库
+    embodied_agent_ws/    ✅ 本项目 Overlay Workspace（在仓库内，随 git 版本管理）
+        src/              ← 本项目自己的包（**进 Git**）
+            embodied_camera_driver/   相机 Driver：时间戳重打 + TF 补发
+        build/ install/ log/          构建产物（**不进 Git**，已 gitignore）
+    vendor_reference/     📖 ~/ros2_ws/src 的本地只读副本，775M，仅供查阅（不进 Git）
+    docs/ tools/          ✅ 文档与 Phase 0 验收工装
 ```
 
-**加载顺序**（以厂商既有顺序为准，不要随意改动）：
+> ⚠️ Overlay 放在**仓库内**而非 `~/embodied_agent_ws`，是为了让代码进 Git、
+> `git status` 能反映真实开发状态（CLAUDE.md §1/§4）。
+> 历史上仓库根曾有一个 `src/src/` 的厂商副本，其存在迫使 `.gitignore` 写了
+> 一条**裸的 `src/`** 规则；该规则会连带忽略工作区自己的源码，故已改名
+> `vendor_reference/` 并把规则改为锚定形式（详见 `docs/DEV_NOTES.md` 坑 4）。
+
+**加载顺序**（以厂商既有顺序为准，不要随意改动；注意 Overlay 必须**在厂商之后** source）：
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
+source ~/JetsonRobot/embodied_agent_ws/install/setup.bash   # ← 本项目 Overlay
 ```
+
+> ⚠️ 上述命令必须在 **bash** 里执行。zsh 没有 `BASH_SOURCE`，ROS 的 `setup.bash`
+> 会定位失败（详见 `docs/DEV_NOTES.md` 坑 5）。

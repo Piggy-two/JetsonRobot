@@ -99,9 +99,17 @@ LLM 无法直接控制电机；所有动作必须经过 Tool / Skill Safety Gate
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
 
+# 本项目 Overlay（必须【在厂商之后】source）
+source ~/JetsonRobot/embodied_agent_ws/install/setup.bash
+
 echo $ROS_DISTRO        # 期望 humble
 which ros2
 ```
+
+> ⚠️ 上面这些命令**必须在 `bash` 里执行**。zsh 没有 `BASH_SOURCE`，ROS 的
+> `setup.bash` 会定位失败（现象与原因见 `docs/DEV_NOTES.md` 坑 5）。
+
+若业务代码有改动，先在 `embodied_agent_ws/` 下 `colcon build --symlink-install`。
 
 ### 4.2 基线检查
 
@@ -120,7 +128,7 @@ ros2 action list
 
 **验收顺序**：底盘与急停 → LiDAR 与 TF → 里程计与定位 → 建图 / 保存地图 → 导航到测试点 → 静态障碍物避障 → 相机、语音与导航联调。
 
-> 实际推进：**LiDAR 与 TF ✅ 已通过**（2026-09-28，`/scan` 10.00 Hz / 360°）；**底盘运动 ✅ 已通过**（2026-10-05，六向方向正确 + 轮速与解算逐位吻合，限速 ±0.2 m/s）；**通信中断 ✅ 已模拟完成**（2026-10-05，D-020 / D-021）；**相机 ✅ 硬件通过**（2026-10-05：端到端延迟 ≈ 一帧（20~45 ms），但 `header.stamp` 早 0.72 s 待收口，**D-022**）；**语音盒 ✅ 硬件通过**（2026-10-05：控制串口 / 录音 / 播放三项，**D-022**）。**剩余**：**急停链路**（唯一剩下的硬件项）、**相机 TF 帧收口**（须先建 Overlay Workspace）、语音软件侧验收。遥控优先级一项用户已表示当前无需求。
+> 实际推进：**LiDAR 与 TF ✅ 已通过**（2026-09-28，`/scan` 10.00 Hz / 360°）；**底盘运动 ✅ 已通过**（2026-10-05，六向方向正确 + 轮速与解算逐位吻合，限速 ±0.2 m/s）；**通信中断 ✅ 已模拟完成**（2026-10-05，D-020 / D-021）；**相机 ✅ 硬件通过**（2026-10-05：端到端延迟 ≈ 一帧（20~45 ms），但 `header.stamp` 早 0.72 s 待收口，**D-022**）；**语音盒 ✅ 硬件通过**（2026-10-05：控制串口 / 录音 / 播放三项，**D-022**）；**Overlay Workspace ✅ 已建立 + 首个业务代码节点 ✅ 已落地**（2026-10-05 第四轮：`embodied_agent_ws/`，内含相机 Driver `embodied_camera_driver`，在同一节点内收口**重新打时间戳 #23** 与**补发 TF `camera_link0 → camera` #16**，**D-023**——项目**自此有业务代码**）。**剩余**：**急停链路**（唯一剩下的硬件项）、**相机 TF 朝向实机校验一次**、语音软件侧验收。遥控优先级一项用户已表示当前无需求。
 >
 > 🔴 已知硬约束（Phase 1+ 设计时不得违反）：**底盘无指令超时保护，停车必须显式持续发 0**；**存活判据只能用 `imu_raw`/`battery`**（`/odom` 断线照发）；**本机没有物理急停**；**图像 `header.stamp` 不可信**（比真实采集时刻早 0.72 s，须在自建 Driver 层重新打时间戳）。另：**相机帧率既非 30 fps 也非恒定**，Phase 4 定帧率预算时须实测并做降级。
 
@@ -144,8 +152,8 @@ ros2 action list
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| **Phase 0** | 环境与硬件启动验收（底盘 / LiDAR / 相机 / 麦克风 / 扬声器 + 接口清单） | 🚧 **进行中**（LiDAR ✅ / 底盘运动 ✅ / 通信中断 ✅ / **相机硬件 ✅** / **语音盒硬件 ✅**；剩余 **急停链路**、相机 TF 收口、语音软件侧验收） |
-| Phase 1 | Driver / Primitive（Camera / Motor / LiDAR Driver） | ⬜ 未开始 |
+| **Phase 0** | 环境与硬件启动验收（底盘 / LiDAR / 相机 / 麦克风 / 扬声器 + 接口清单） | 🚧 **进行中**（LiDAR ✅ / 底盘运动 ✅ / 通信中断 ✅ / **相机硬件 ✅** / **语音盒硬件 ✅**；剩余 **急停链路**、相机 TF 朝向校验、语音软件侧验收） |
+| **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅**（`embodied_camera_driver`，D-023）；Motor / LiDAR Driver 未开始 |
 | Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | ⬜ 未开始 |
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
 | Phase 4 | Semantic Skills（`search_object` / `inspect_area` / `patrol_route` / `return_home`） | ⬜ 未开始 |
@@ -153,7 +161,7 @@ ros2 action list
 | Phase 6 | Agent Runtime（Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway） | ⬜ 未开始 |
 | Phase 7 | Hybrid LLM（Rule Engine + Cloud LLM + 预留 Local Small LLM） | ⬜ 未开始 |
 
-> **仓库现状**：目前包含设计方案（`docs/plan.md`）与 Phase 0 验收工装（`tools/`），**尚无业务代码**。业务代码将在 Phase 0 验收通过后按上表顺序引入。
+> **仓库现状**：包含设计方案（`docs/plan.md`）、Phase 0 验收工装（`tools/`）、以及 **Overlay 业务代码工作区 `embodied_agent_ws/`**（首个节点为相机 Driver `embodied_camera_driver`，2026-10-05 落地，**D-023**）。后续业务代码按上表顺序在该工作区内引入。
 
 **第一版明确不做**：机械臂、多机器人、强化学习导航、复杂 RAG、大型本地 VLM、自动充电。
 
@@ -168,6 +176,8 @@ ros2 action list
 | [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) | 当前进度、已知问题、下一步计划（**恢复项目状态的入口**） |
 | [`docs/DEVELOPMENT_LOG.md`](docs/DEVELOPMENT_LOG.md) | 按日期的重要开发记录 |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | 重要技术决策及原因 |
+| [`docs/DEV_NOTES.md`](docs/DEV_NOTES.md) | **开发思路、踩坑与解法** —— 方法论（如何给测不准的量造独立基准）与可复现的教训 |
+| [`embodied_agent_ws/`](embodied_agent_ws/) | **本项目 Overlay Workspace**（业务代码在此；`build/ install/ log/` 不进 Git） |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code 长期开发规则 |
 | [`tools/`](tools/) | Phase 0 验收工装：`phase0_chassis_motion_acceptance.py`（底盘六向运动验收）、`lidar_rotation_probe.py`（用 LiDAR 独立测原地旋转角速度，丢帧免疫）、`camera_latency_probe.py`（用 `v4l2` 控制项当"世界端探针"，分离相机**端到端延迟**与**时间戳偏移**）。**验收用，不是运行时组件** |
 
