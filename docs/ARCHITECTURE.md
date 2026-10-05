@@ -201,6 +201,11 @@ Safety > Control > Skill > Agent
 >
 > 因此 **Motor Stop 的动作定义为「主动、持续向 `/cmd_vel` 发布零速度」**，而不是「停止发指令」；且 Safety Runtime 必须拥有**独立于 Control Skill 的发布通道**，否则上游一旦卡死，停车指令也发不出去。
 
+> ⚠️ **实测约束（2026-10-05，D-021）—— Watchdog 的「输入信号」本身有陷阱**：
+> - **存活判据只能用 `/ros_robot_controller/imu_raw` 与 `/ros_robot_controller/battery`。** 断线实测中 `/odom` **照常发布 28.5 Hz**（它是纯死推算），拿它做 watchdog 输入等于**监视自己**；桥节点进程状态同样不可靠（三轮实测三种行为）。
+> - **厂商栈不会自恢复**：USB 断线后仅重新 bind 无效，必须重启整个 `start_app_node.service`（秒级全栈中断）。→ **本项目必须自己实现串口重连**，在此之前「断线→重新可控」之间存在**秒级安全窗口**，且窗口内底盘保持最后速度（D-020）。
+> - **本机没有物理急停**（厂商按键脚本里的 `sudo halt` 被注释掉）→ 不存在可以兜底的硬件层。**唯一的停车手段是软件持续发 0，或直接断电。**
+
 ---
 
 ## 7. Hybrid Command Router

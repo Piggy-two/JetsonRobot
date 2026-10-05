@@ -80,7 +80,7 @@ LLM 无法直接控制电机；所有动作必须经过 Tool / Skill Safety Gate
 | 计算平台 | NVIDIA Jetson Orin（L4T **R36.4.3**，JetPack 6.x） |
 | OS | Linux `5.15.148-tegra` (aarch64) |
 | ROS2 | **Humble**（`/opt/ros/humble`） |
-| 底盘 | 麦克纳姆轮（厂商 ROS2 栈，含 `ros_robot_controller` / `controller` / `kinematics` / `servo_controller`）。命令链 `/cmd_vel` → `odom_publisher` → `/ros_robot_controller/set_motor`；`/odom` 30 Hz。✅ **2026-10-05 六向运动实测通过**（方向正确、轮速与解算逐位吻合），入口 `/cmd_vel` 厂商限幅 **±0.2 m/s / ±0.5 rad/s**。⚠️ **底盘无指令超时保护，停车必须显式发 0**（D-020） |
+| 底盘 | 麦克纳姆轮（厂商 ROS2 栈，含 `ros_robot_controller` / `controller` / `kinematics` / `servo_controller`）。命令链 `/cmd_vel` → `odom_publisher` → `/ros_robot_controller/set_motor`；`/odom` 30 Hz。✅ **2026-10-05 六向运动实测通过**（方向正确、轮速与解算逐位吻合），入口 `/cmd_vel` 厂商限幅 **±0.2 m/s / ±0.5 rad/s**。⚠️ **底盘无指令超时保护，停车必须显式发 0**（D-020）；同日**通信中断模拟**实测：指令断裂时底盘仍以 **105% 速率继续旋转**，断线后 `/odom` 照发而 `imu_raw`/`battery` 停发、**不自恢复**，且**本机无物理急停**（D-021） |
 | 相机 | **单目** USB 摄像头（UVC `32e6:9005`，YUYV 640×480@30，`/dev/video0`）。全系统**无深度相机**，视觉基线见 `docs/DECISIONS.md` D-017；已按 D-019 走厂商 `usb_cam` 分支，`/depth_cam/rgb0/image_raw` 已出图（话题速率与 TF 帧待收口） |
 | 雷达 | **LD19**（`ldlidar_stl_ros2`，230400，`/dev/lidar`）。✅ **`/scan` 实测通过**：10.00 Hz、360°、502~505 点/帧、有效回波 93.5~97.0%、`frame_id=lidar_frame`，TF 已就位（见 D-018 与 `docs/PROJECT_STATUS.md` §7） |
 | 语音 | `xf_mic_asr_offline`。配置为 `MIC_TYPE=xf` / `ASR_MODE=online`（⚠️ 在线 ASR，断网降级方案待确认）；USB 声卡已识别，`/dev/ring_mic` 待建立 |
@@ -120,9 +120,11 @@ ros2 action list
 
 **验收顺序**：底盘与急停 → LiDAR 与 TF → 里程计与定位 → 建图 / 保存地图 → 导航到测试点 → 静态障碍物避障 → 相机、语音与导航联调。
 
-> 实际推进：**LiDAR 与 TF ✅ 已通过**（2026-09-28，`/scan` 10.00 Hz / 360°）；**底盘运动 ✅ 已通过**（2026-10-05，六向方向正确 + 轮速与解算逐位吻合，限速 ±0.2 m/s）；相机已出图待收口。**剩余**：底盘安全侧（急停 / 遥控优先级 / 通信中断停车）、相机收口、语音。
+> 实际推进：**LiDAR 与 TF ✅ 已通过**（2026-09-28，`/scan` 10.00 Hz / 360°）；**底盘运动 ✅ 已通过**（2026-10-05，六向方向正确 + 轮速与解算逐位吻合，限速 ±0.2 m/s）；**通信中断 ✅ 已模拟完成**（2026-10-05，见 D-020 / D-021）。相机已出图待收口。**剩余**：急停链路与遥控优先级（遥控一项用户已表示当前无需求）、相机收口、语音。
+>
+> 🔴 已知安全前提：**底盘无指令超时保护，停车必须显式持续发 0**；**存活判据只能用 `imu_raw`/`battery`**（`/odom` 断线照发）；**本机没有物理急停**。
 
-> ⚠️ 任何运动测试均必须保留急停、限速和人工看护。
+> ⚠️ 任何运动测试均必须保留急停、限速和人工看护。**由于本机无物理急停，测试时人必须能直接断电。**
 
 ### 4.4 磁盘容量状态
 
@@ -142,7 +144,7 @@ ros2 action list
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| **Phase 0** | 环境与硬件启动验收（底盘 / LiDAR / 相机 / 麦克风 / 扬声器 + 接口清单） | 🚧 **进行中**（LiDAR ✅ / 底盘运动 ✅；剩余底盘安全侧 / 相机收口 / 语音） |
+| **Phase 0** | 环境与硬件启动验收（底盘 / LiDAR / 相机 / 麦克风 / 扬声器 + 接口清单） | 🚧 **进行中**（LiDAR ✅ / 底盘运动 ✅ / 通信中断 ✅；剩余急停链路 / 相机收口 / 语音） |
 | Phase 1 | Driver / Primitive（Camera / Motor / LiDAR Driver） | ⬜ 未开始 |
 | Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | ⬜ 未开始 |
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
@@ -167,7 +169,7 @@ ros2 action list
 | [`docs/DEVELOPMENT_LOG.md`](docs/DEVELOPMENT_LOG.md) | 按日期的重要开发记录 |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | 重要技术决策及原因 |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code 长期开发规则 |
-| [`tools/`](tools/) | Phase 0 验收工装（如 `phase0_chassis_motion_acceptance.py`）。**验收用，不是运行时组件** |
+| [`tools/`](tools/) | Phase 0 验收工装：`phase0_chassis_motion_acceptance.py`（底盘六向运动验收）、`lidar_rotation_probe.py`（用 LiDAR 独立测原地旋转角速度，丢帧免疫）。**验收用，不是运行时组件** |
 
 ---
 
