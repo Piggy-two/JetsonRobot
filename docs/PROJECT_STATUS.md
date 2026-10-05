@@ -3,13 +3,13 @@
 > **这是 Claude Code 下一次会话快速恢复项目状态的主要文件。**
 > 每次开发任务结束前必须更新本文件。
 >
-> **最后更新：2026-09-28**
+> **最后更新：2026-10-05**
 
 ---
 
 ## 1. 一句话状态
 
-**项目处于 Phase 0 硬件验收阶段：设计文档与工程维护机制已建立、磁盘阻塞已解除，仍无业务代码。2026-09-28 完成两轮硬件验收 —— 第一轮为全量接口侦察（四个 USB 口逐口识别、LiDAR 型号实测确认为 LD19、相机定性为单目，决策 D-017 / D-018）；第二轮修掉 LiDAR 的 udev 错配并重启厂商栈验证，`/scan` **实测通过**（10.00 Hz、360°、`frame_id=lidar_frame`、TF `base_link→lidar_frame` 已存在），相机按 D-019 切到厂商 `usb_cam` 分支后 `/depth_cam/rgb0/image_raw` 已出图。Phase 0 现在只剩**底盘与急停的实机运动验收**（需车轮悬空或安全距离 + 人工看护）这块硬骨头 —— 运动仍**未测**。**
+**项目处于 Phase 0 硬件验收阶段：设计文档与工程维护机制已建立、磁盘阻塞已解除，仍无业务代码。2026-09-28 完成两轮硬件验收 —— 第一轮为全量接口侦察（四个 USB 口逐口识别、LiDAR 型号实测确认为 LD19、相机定性为单目，决策 D-017 / D-018）；第二轮修掉 LiDAR 的 udev 错配并重启厂商栈验证，`/scan` **实测通过**（10.00 Hz、360°、`frame_id=lidar_frame`、TF `base_link→lidar_frame` 已存在），相机按 D-019 切到厂商 `usb_cam` 分支后 `/depth_cam/rgb0/image_raw` 已出图。2026-10-05 在人工看护下完成**底盘运动验收**（决策 D-020）—— 前进/后退/左移/右移/左转/右转六向方向全部正确、轮速与运动学数值逐位吻合、`/cmd_vel` 厂商限幅（±0.2 m/s / ±0.5 rad/s）实测生效、IMU 独立佐证原地旋转为真实运动，**底盘运动链路通过**。同轮发现**底盘无指令超时保护**（停止发布后电机保持最后速度），已立为安全约束 D-020。Phase 0 现在只剩**急停链路 / 遥控优先级 / 通信中断停车**（均需物理操作）+ 相机收口 + 语音三件事 —— 但**「必须显式发 0 才停车」这条已改变 Safety 设计前提**。**
 
 ---
 
@@ -24,12 +24,12 @@
 | 验收项 | 状态 | 说明 |
 |---|---|---|
 | 基线环境（ROS2 / Jetson / 磁盘 / 环境加载链） | 🟢 已完成 | ROS2 Humble、Jetson Orin（8GB，内存 7.4Gi）、磁盘已扩容至 116G；环境加载链与机型配置位置已记录（`.zshrc` → `.robotrc` → `.typerc`，原已知问题 #6 已关闭） |
-| 底盘与安全（`ros_robot_controller` / `controller` / `kinematics` / `servo_controller`） | 🟡 进行中 | 命令链与 `/odom`(30.0 Hz) 已实测确认（见 §7）；**运动未测**（需急停 + 看护）；遥控链路 `/sbus`、`/joy`、`/button` 已确认存在 |
+| 底盘与安全（`ros_robot_controller` / `controller` / `kinematics` / `servo_controller`） | 🟢 **运动已通过**，安全侧待补 | **2026-10-05 人工看护下完成六向运动验收**：方向全部正确、轮速与运动学逐位吻合、`/cmd_vel` 限幅实测生效、IMU 佐证真实运动（见 §7）。⚠️ 但**急停链路 / 遥控优先级 / 通信中断停车未测**；且实测**底盘无指令超时保护**（#18 / D-020）——停车必须显式发 0 |
 | LiDAR 与避障 | 🟢 **已完成（通过）** | 型号实测确认为 **LD19**，设备健康（CRC 99.9%、4992 点/秒，见 D-018）。原「无 `/scan`」根因是 udev 把 `/dev/lidar` 指向了底盘串口，**已修复并重启验证通过**：`/scan` **10.00 Hz**、360°、502~505 点/帧、有效回波 93.5~97.0%、`frame_id=lidar_frame`、TF `base_link→lidar_frame`（静态 `[0.011, 0, 0.136]`）存在。实测记录见 §7 |
 | 相机与视觉 | 🟡 已出图，细节待收口 | 实测为**单目** UVC 摄像头（icSpring `32e6:9005`，YUYV 640×480@30，`/dev/video0`），全系统仅此一个摄像头（视觉基线 **D-017**）。已按 **D-019** 把 `.typerc` 切到厂商 `usb_cam` 分支 → `/depth_cam/rgb0/image_raw` 由 0 个发布者变为 **1 个**。⚠️ 话题速率仅 ~10.3–10.9 Hz（设备侧协商 30 fps，#15）；图像 `frame_id=camera` 不在 TF 树中（#16） |
 | 语音与麦克风（`xf_mic_asr_offline`） | ⬜ 未开始 | 已知配置 `MIC_TYPE=xf` / `ASR_MODE=online`（⚠️ 在线 ASR，断网不可用）。USB 声卡 0（`0c76:161f`）已被内核识别，但 `/dev/ring_mic` 未建立 —— 根因已定位：`xf_mic.rules` 期望麦克风串口在 `1-2.3.1`，而该口现在是**相机**（#14） |
 | SLAM / 导航 / 系统联调 | ⬜ 未开始 | 依赖上述全部通过 |
-| **接口清单交付物** | 🟡 进行中 | 底盘 / 相机 / LiDAR 已填入实测值；**LiDAR 已可标"通过"**，语音与导航待补 |
+| **接口清单交付物** | 🟡 进行中 | 底盘 / 相机 / LiDAR 已填入实测值；**LiDAR 与底盘（运动）已可标"通过"**，语音与导航待补 |
 
 ---
 
@@ -46,12 +46,13 @@
 | Phase 0 基线 ROS 图实测 | 厂商 `bringup` 整机栈在运行时的 18 节点 / 50+ 话题、底盘命令链、`/odom` 30Hz、遥控链路、app 争用点全部摸清（见 `DEVELOPMENT_LOG.md`） | 2026-09-23 |
 | **硬件接口全量侦察** | 四个 USB 口逐口识别（含 Hub 拓扑）、LiDAR 型号确认为 LD19 并实测健康度、相机定性为单目、"LiDAR 无 `/scan`" 根因定位并修复 udev、`.typerc` 机型配置错配定位（见 `DEVELOPMENT_LOG.md`；决策 D-017 / D-018） | 2026-09-28 |
 | **LiDAR `/scan` 验收通过 + 相机接入厂商 `usb_cam`** | 重启厂商栈（`start_app_node.service`）验证：`/scan` 10.00 Hz / 360° / `frame_id=lidar_frame`、TF 已存在、有效回波 93.5~97.0%；相机按 D-019 改 `.typerc` 后出图（remap 后话题名与旧分支一致，下游 app 无需改动）；期间 `/controller/cmd_vel` **全程静默**，坐实厂商 4 个 app 重启后处于**未激活**状态（#10 更新） | 2026-09-28 |
+| **底盘运动验收通过** | 人工看护下实测六向运动：前进/后退/左移/右移/左转/右转方向全部正确，轮速与麦轮解算**逐位吻合**（0.1 m/s → 0.3979 rps；0.3 rad/s → 0.2081 rps）；`/cmd_vel` 限幅实测生效（指令 0.30 → 实际 0.20 m/s）；IMU 陀螺仪独立佐证原地旋转为真实运动。新增验收工装 `tools/phase0_chassis_motion_acceptance.py`。**同轮发现底盘无指令超时保护**（见 #18 / **D-020**） | 2026-10-05 |
 
 ---
 
 ## 4. 正在进行
 
-- **无正在进行的代码开发。** 当前处于"文档与基础设施就绪、硬件验收收尾"的节点：LiDAR 已通过，剩余**相机收口**（#15/#16）、**语音前置**（`/dev/ring_mic`，#14）与**底盘运动验收**。
+- **无正在进行的代码开发。** 当前处于"文档与基础设施就绪、硬件验收收尾"的节点：**LiDAR 与底盘运动已通过**。剩余三块：① **底盘安全侧**（急停链路 / 遥控优先级 / 通信中断停车，均需物理操作）；② **相机收口**（#15 速率 / #16 frame_id）；③ **语音前置**（`/dev/ring_mic`，#14）。
 
 ---
 
@@ -68,7 +69,7 @@
 | 7 | **内存仅 7.4Gi（8GB 版 Orin）** | 🟡 设计约束 | **实测：厂商 bringup 栈一启动即占用 ~5.5G（5472/7620MB）**，留给本项目的余量很小 → Phase 6/7 本地小模型与视觉并发必须按此预算设计；`/swapfile` 8G 是实际安全余量，**不要缩** |
 | 8 | ~~syslog 中 `aurora930_node` 反复 `wait device insert...`~~ **已解释** | ✅ 已澄清 | **2026-09-28**：Aurora930 是**深度相机**（Deptrum，VID `3251`）驱动，**不是** LiDAR 驱动（此前记错）。本机无该设备，故节点反复等待后于 `21:12:20` 报 `No deptrum device connected! It's going to quit...` 并退出。根因是 `.typerc` 机型配置写成 `DEPTH_CAMERA_TYPE=aurora`，见已知问题 #13 与 **D-017** |
 | 9 | `apt` 有 1008 个待升级包 | ⬜ 非缺陷 | 暂不升级（升级前需确认不影响厂商 SDK 与内核）；涉及 `linux-headers-generic` 元包，勿单独 purge |
-| 10 | **厂商 app 可随时接管底盘** | 🔴 安全 | 实测 `/controller/cmd_vel` 有 **5 个发布者**（`lidar_app` / `line_following` / `object_tracking` / `self_driving` / `joystick_control`），各自带 `enter` / `heartbeat` / `set_running` 服务，**被激活即开始发运动指令**。**2026-09-28 补充实测**：整栈重启后这些节点只是**注册了发布者但不发消息**（`/controller/cmd_vel` 连续采样全程静默）—— 即**默认关闭、需显式 `set_running` 才动**。这降低了重启风险，但**不改变结论**：运动测试前必须确认它们未激活，并保留急停与人工看护 |
+| 10 | **厂商 app 可随时接管底盘** | 🔴 安全 | 实测 `/controller/cmd_vel` 有 **5 个发布者**（`lidar_app` / `line_following` / `object_tracking` / `self_driving` / `joystick_control`），各自带 `enter` / `heartbeat` / `set_running` 服务，**被激活即开始发运动指令**。**2026-09-28 补充实测**：整栈重启后这些节点只是**注册了发布者但不发消息**（`/controller/cmd_vel` 连续采样全程静默）—— 即**默认关闭、需显式 `set_running` 才动**。**2026-10-05 复测**：运动验收前再次采样 6 s，仍然全程静默，5 个 app 均未激活。这降低了重启风险，但**不改变结论**：运动测试前必须确认它们未激活，并保留急停与人工看护 |
 | 11 | ~~相机有 publisher 但无数据流~~ **已解决** | ✅ 已解除 | **2026-09-28 定性**：不是"有 publisher 无数据"，而是**话题挂在一个不存在的深度相机上**（`DEPTH_CAMERA_TYPE=aurora`）。按 **D-019** 切到厂商 `usb_cam` 分支后，`/depth_cam/rgb0/image_raw` 由 0 个发布者变为 **1 个**，图像已实测出流。遗留细节另立 #15 / #16 |
 | 12 | 厂商栈含机械臂/夹爪控制器 | ⬜ 非本项目范围 | `/arm_controller`、`/gripper_controller` 提供 `follow_joint_trajectory`；按 `DECISIONS.md` D-012 第一版不做机械臂，仅记录其存在 |
 | 13 | ~~`.typerc` 机型配置与实机硬件不符~~ **已解决** | ✅ 已解除 | `~/ros2_ws/.typerc:9` 原为 `DEPTH_CAMERA_TYPE=aurora`（期望深相机），与实机的单目 USB 摄像头不符。逐项核对：`LIDAR_TYPE=LD19` ✅ 一致；`DEPTH_CAMERA_TYPE` ❌ 不符。厂商 `usb_cam` 分支参数（`/dev/video0` + `yuyv` + 640×480）与实机**逐项吻合**。**2026-09-28 按用户决策改为 `usb_cam`**（备份 `.typerc.bak-20260928`）并重启验证出图，决策与影响见 **D-019** |
@@ -76,6 +77,9 @@
 | 15 | **相机话题速率远低于设备侧速率（~11 Hz vs 30 fps）** | 🟡 Phase 4 前必须收口 | 设备侧 `v4l2-ctl --get-parm` 协商 **640×480 YUYV @ 30.000 fps**，`usb_cam` 日志亦报 `at 30 FPS`；但 `/depth_cam/rgb0/image_raw` **四次独立实测全部落在 9.8 ~ 11.5 Hz**（10.75 / 10.27 / 9.79 Hz，以及最小间隔 0.081 s）。候选原因：① 发布环本就 ~11 Hz；② **Python 订阅侧丢帧**（614 KB/帧 × 30 fps ≈ 18 MB/s）；③ 同一 USB2 Hub 上等时音频与两个 CH340 分走带宽。**第三次实测的间隔分布高度均匀**（min 0.081 s / max 0.096 s / std dev 0.004 s，而非 33/67/100 ms 的丢帧特征）→ 更像①；但 `camera_info`（极小消息）曾出现 **0.027 s 间隔（≈37 Hz）**，与①矛盾。**证据不一致，故不下结论** —— 需用 C++ 订阅端或 `usb_cam` 自身帧计数确认，Phase 4 定帧率预算前必须定论 |
 | 16 | **图像 `frame_id=camera` 不在 TF 树中** | 🟡 Phase 4 前置 | `usb_cam_param.yaml` 的 `frame_id: "camera"`，而 TF 树中的相机帧是 `camera_link0`（`base_link → camera_link0`），另有 `depth_cam` 分支留下的**孤立**静态 TF `ascamera_camera_link_0 → depth_cam_color_frame`。→ **图像消息的相机帧无法在 TF 中解析**（厂商遗留不一致）。做 D-007 的 `get_target_position()` 时必须显式补齐/指定相机帧，**不得假设图像帧可直接做 TF 变换** |
 | 17 | **厂商 `99-usb-cam.rules` 指向不存在的脚本** | ⬜ 非阻塞 | `/etc/udev/rules.d/99-usb-cam.rules:3` 的 `RUN+="/home/ubuntu/.dtb/.link_yuyv_camera.sh"` 指向**不存在的脚本**（`~/.dtb/` 目录不存在）→ 规则空转，**系统里没有稳定的相机符号链接**（对比雷达有 `/dev/lidar`）。当前 `/dev/video0` 只是枚举顺序的结果，**多摄像头或重插后不保证稳定**。本项目若需固定相机路径，应在 Overlay 自建 udev 规则（不改厂商文件） |
+| 18 | **底盘无指令超时保护（停车必须显式发 0）** | 🔴 **安全设计前提** | **2026-10-05 实测**：向 `/cmd_vel` 发 1.5 s 速度后**完全停止发布**，4 s 内 `set_motor` 无新消息，但 IMU 振荡幅度仍为 **±0.067 rad/s**（对比发 0 时仅 ±0.0015）→ **电机保持最后一条速度指令继续转**。源码佐证：`set_motor_speed()` 报文不带 duration，`ros_robot_controller_node` 无超时/看门狗。**影响**：Safety Runtime 的急停**不能**依赖「上游停止发指令」，必须**主动持续发 0**，且要有独立发布通道。已立为 **D-020**，验收工装 `tools/phase0_chassis_motion_acceptance.py` 按此实现 |
+| 19 | **`/controller/cmd_vel` 完全无限幅** | 🟡 已规避 | `odom_publisher.cmd_vel_callback`（`/controller/cmd_vel` 路径）**不做任何速度钳制**，而 `app_cmd_vel_callback`（`/cmd_vel` 路径）钳到 ±0.2 m/s / ±0.5 rad/s。5 个厂商 app 全在无限幅那条上。本项目按 **D-016** 只走 `/cmd_vel`，故已规避；但**记录在案**：任何时候误发 `/controller/cmd_vel` 都没有第二道限幅 |
+| 20 | **急停 / 遥控优先级 / 通信中断停车均未测** | 🟡 Phase 0 待办 | 2026-10-05 运动验收**未覆盖**这三项（均需物理操作：按键、遥控器、拔插 `/dev/rrc`）。`/ros_robot_controller/button`、`/sbus`、`/joy` 话题已确认存在但**行为未验证**。**「通信中断时底盘是否停车」直接关系到 D-020 的严重程度**，建议优先补 |
 
 ---
 
@@ -83,7 +87,11 @@
 
 **优先级从高到低：**
 
-1. **底盘与急停验收**（**当前 Phase 0 唯一剩下的硬骨头**，**必须**车轮悬空或留安全距离 + 人工看护）—— 前置条件已明确：5 个厂商 app **默认关闭**，需显式 `set_running` 才发运动指令（#10 已实测坐实），因此开测前只需确认它们未激活。测试 `stop()`、低速前进/后退/平移/原地旋转；验证速度上限、命令超时、通信中断停车、**遥控优先级**（`/ros_robot_controller/sbus` / `joy` / `button` 已确认存在）。从 `/cmd_vel` 发布测试（见 D-016）。
+1. **底盘安全侧验收**（**Phase 0 剩下的硬骨头**，均需物理操作 + 人工看护）：
+   - **通信中断停车**（**优先级最高**）—— 拔掉底盘串口 `/dev/rrc`，验证通信断开时底盘是否停车。**这直接决定 #18 / D-020 的严重程度**：若断通信也不停，则必须有独立的软件急停通道。
+   - **急停链路** —— `/ros_robot_controller/button` 的物理按键行为，以及断电响应。
+   - **遥控优先级** —— `/ros_robot_controller/sbus` / `joy` 与 `/cmd_vel` 的优先级关系。
+   > 前置条件已明确：5 个厂商 app **默认关闭**（#10，2026-10-05 复测仍静默），开测前确认其未激活即可。运动测试一律保留限速与看护。
 2. **相机链路收口**（#15 速率 / #16 frame_id）—— 数据已通（D-019），但要先把「话题实际 ~10.6 Hz 而设备 30 fps」的原因定下来，并补齐相机 TF 帧。**收口后再决定 D-019 留的口子：继续用厂商 `usb_cam`，还是在 Overlay 自建 Driver。**
 3. **确认 `ttyCH341USB1` = 讯飞环形麦并解决 Hub 口冲突**（#14）—— 麦克风串口与相机在抢 Hub 口 3；这步不解决，Phase 5 语音无法开工。需人工在场（拔插验证）或改 udev 规则后跑厂商麦克风自检。
 4. **恢复语音自检链路** —— 让 `/dev/ring_mic` 真正建立，使厂商 `startup_check` 能自动跑 `xf_mic_asr_offline/startup_test.launch.py`。
@@ -101,7 +109,7 @@
 
 | 模块 | 已确认驱动/包 | 启动入口 | 输入接口 | 输出接口 | TF / 设备路径 | 验收结果 |
 |---|---|---|---|---|---|---|
-| 底盘 | ✅ `ros_robot_controller`（硬件桥）+ `controller`/`odom_publisher`（运动学）+ `servo_controller` | `ros2 launch bringup bringup.launch.py`（实测在运行） | ✅ `/cmd_vel` 或 `/controller/cmd_vel`（`geometry_msgs/Twist`）→ `odom_publisher` → `/ros_robot_controller/set_motor`（`MotorsState`） | ✅ `/odom_raw` → `ekf_node` → `/odom`（**实测 30.0 Hz**，抖动 <1ms）；`/ros_robot_controller/{battery,button,imu_raw,joy,sbus}` | ⬜ TF 帧待确认 | 🟡 链路已实测；**运动未测** |
+| 底盘 | ✅ `ros_robot_controller`（硬件桥）+ `controller`/`odom_publisher`（运动学）+ `servo_controller` | `ros2 launch bringup bringup.launch.py`（实测在运行） | ✅ **`/cmd_vel`**（`geometry_msgs/Twist`，**厂商限幅 ±0.2 m/s / ±0.5 rad/s**）→ `odom_publisher` → `/ros_robot_controller/set_motor`（`MotorsState`）。⚠️ `/controller/cmd_vel` **无限幅且 5 个 app 争用**，不用（#19 / D-016） | ✅ `/odom_raw` → `ekf_node` → `/odom`（**实测 30.0 Hz**，抖动 <1ms）；`/ros_robot_controller/{battery,button,imu_raw,joy,sbus}` | 设备 `/dev/rrc`（`ttyACM0`）；⬜ TF 帧待确认 | ✅ **运动通过**（2026-10-05，数据见下）；⚠️ 急停/遥控/通信中断未测（#20） |
 | LiDAR | ✅ **LD19**（`ldlidar_stl_ros2`，230400） | `peripherals/launch/include/ldlidar_LD19.launch.py`（由 `LIDAR_TYPE=LD19` 选择） | ✅ `/dev/lidar` → `ttyCH341USB0`（Hub 口 `1-2.1`） | ✅ `/scan`（`sensor_msgs/LaserScan`），**实测 10.00 Hz** | 设备 `/dev/lidar`；`frame_id=lidar_frame`；TF `base_link → lidar_frame` 静态 `[0.011, 0, 0.136]` | ✅ **通过**（2026-09-28 实测，数据见下） |
 | 相机 | 单目 UVC（内核 `uvcvideo`）+ 厂商 `usb_cam` 分支 | 厂商 `peripherals/launch/depth_camera.launch.py`（`DEPTH_CAMERA_TYPE=usb_cam` → `usb_cam_node_exe`，见 D-019） | ✅ `/dev/video0`（YUYV 640×480@30，设备侧协商） | ✅ `/depth_cam/rgb0/image_raw`（1 个发布者，`encoding=yuv422_yuy2`）+ `/depth_cam/rgb0/camera_info` | 设备 `/dev/video0`；图像 `frame_id=camera`（**不在 TF 树中**，#16） | 🟡 已出图；速率与 TF 待收口（#15 / #16） |
 | 语音 | `xf_mic_asr_offline`（未运行） | ⬜ | ⬜ | ⬜ | 声卡 0 = USB Audio `0c76:161f`；`/dev/ring_mic` **未建立**（#14） | ⬜ 未测 |
@@ -153,6 +161,30 @@ USB3 侧（bus 2）的 4 口 Hub 上无任何设备
 | 驱动日志 | `ldlidar communication is normal.` + `Publish topic message:ldlidar scan data.` |
 
 > 📌 **记录方式说明**：`ros2 topic echo` 对长数组会**省略**为一行 `- '...'`（本机实测 502 个点只打印出 129 行），**不能**用它判断点数或丢点。上表的点数 / 有效率来自 `rclpy` 订阅端直接读 `msg.ranges`。
+
+**实测底盘运动（2026-10-05 · 底盘验收通过）**
+
+条件：`/cmd_vel` 持续发布 20 Hz、每步 2.0 s、人工看护；工装 `tools/phase0_chassis_motion_acceptance.py`。
+
+| 步 | 指令 | 实测轮速 rps（motor1~4） | IMU 陀螺 z | 判定 |
+|---|---|---|---|---|
+| 前进 | vx=+0.100 | +0.3979 / +0.3979 / −0.3979 / −0.3979 | +0.005 | ✅ |
+| 后退 | vx=−0.100 | −0.3979 / −0.3979 / +0.3979 / +0.3979 | +0.019 | ✅ |
+| 左移 | vy=+0.100 | −0.3979 / +0.3979 / −0.3979 / +0.3979 | −0.033 | ✅ |
+| 右移 | vy=−0.100 | +0.3979 / −0.3979 / +0.3979 / −0.3979 | −0.067 | ✅ |
+| 左转 | wz=+0.300 | 四轮同为 −0.2081 | **+0.285**（复测 +0.314） | ✅ |
+| 右转 | wz=−0.300 | 四轮同为 +0.2081 | **−0.238**（复测 −0.266） | ✅ |
+| **限幅** | vx=+0.300 | 四轮 ±0.7958 | — | ✅ 被钳到 **0.20 m/s** |
+
+**换算校验**：`0.100 / (π × 0.08) = 0.3979 rps`；`0.300 × (0.17706+0.17165)/2 / (π × 0.08) = 0.2081 rps` —— 与实测**逐位一致**。
+
+**独立物理量佐证（IMU）**：`/ros_robot_controller/imu_raw` 空闲 `angular_velocity.z` = **+0.00898 rad/s、std 0.00081**，`linear_acceleration.z` = **9.47 m/s²**（≈ g）→ 标定良好。原地旋转指令 0.300 rad/s，IMU 实测 **+0.285 / −0.238**（复测 +0.314 / −0.266）→ **符号正确、量级 79%~105%**，证明机身确实按指令方向转动。
+
+> ⚠️ **`/odom` 的 twist 不能作为运动证据**：`odom_publisher.cal_odom_fun()` 直接把**订阅到的指令值**当作速度积分（纯死推算），所以「指令 = `/odom` 读数」只证明链路通。**真转没转，看 IMU 或看轮子。**
+
+> ⚠️ **判「电机是否仍在转」要用 IMU 振荡幅度，不要用均值**：电机振动使瞬时值在 ±0.06 rad/s 内摆动，取均值会随机落在任意值上（实测同一场景两次得到 +0.003 与 −0.227）。**幅度**在转时为 ±0.05~0.067，停时为 ±0.0015，区分度极高。
+
+> 🔴 **底盘无指令超时保护**（详见 #18 / **D-020**）：停止发布后电机保持最后速度，**必须显式发 0 才停**。这是 Safety Runtime 的硬约束。
 
 ---
 

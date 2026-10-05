@@ -340,6 +340,32 @@
 
 ---
 
+## D-020：底盘速度上限与「无指令超时」——停车必须靠显式发 0
+
+**决策**：Control Skill / 任何控制路径在结束运动、异常、取消、超时时，**必须显式向 `/cmd_vel` 发布零速度**，并**不得**假设底盘会因「没有新指令」而自行停车。Safety Runtime 的停车动作也必须落到「持续发 0」上，而不是「停止发布」。
+
+**实测依据**（2026-10-05 底盘运动验收，完整数据见 `DEVELOPMENT_LOG.md` 与 `PROJECT_STATUS.md` §7）：
+
+| 发现 | 实测 |
+|---|---|
+| `/cmd_vel` 入口限幅 | ✅ 指令 `vx=+0.30` → 电机实际 `rps=0.7958` = **0.20 m/s**（`app_cmd_vel_callback` 钳到 ±0.2 / ±0.5） |
+| `/controller/cmd_vel` 入口 | ❌ **无任何限幅**（`cmd_vel_callback` 直通），且 5 个厂商 app 挂在其上 |
+| **指令超时保护** | ❌ **不存在**。停止发布后 `set_motor` 无新消息，但 IMU 振荡幅度仍为 ±0.067 rad/s（对比发 0 时仅 ±0.0015）→ **电机保持最后一条速度指令继续转** |
+| 源码佐证 | `ros_robot_controller_sdk.set_motor_speed()` 的报文**不带 duration**；`ros_robot_controller_node` 无 `create_timer` 看门狗、无 `cmd` 超时逻辑 |
+| IMU 零偏基线 | +0.00898 rad/s，std 0.00081（`angular_velocity.z`），加速度 z = 9.47 m/s² → 该 IMU 可作运动验证的独立物理量 |
+
+**原因**：
+- 底盘控制板是「设置并保持」语义：一次 `set_motor` 报文写入后，固件不会自行归零。这与常见底盘「心跳超时自动停车」的约定**不同**，必须显式记录，否则上层很容易写出「停止发布即停车」的错误安全逻辑。
+- `/cmd_vel` 与 `/controller/cmd_vel` 的限幅差异是**隐藏的安全边界**：前者有厂商限幅可当第二道防线，后者没有。这进一步坐实 D-016 选 `/cmd_vel` 的正确性。
+
+**影响 / 约束**：
+- ⚠️ **Safety Runtime 的急停必须是「主动持续发 0」**，且要有独立的发布通道 —— 不能依赖「上游不再发指令」。
+- 所有 Control Skill 的 `stop()`、异常 `except`、超时 `finally` 路径都必须发 0（本仓库验收工装 `tools/phase0_chassis_motion_acceptance.py` 即按此实现，可作范例）。
+- 速度上限由 `odom_publisher` 决定：**`/cmd_vel` 上 linear ±0.2 m/s、angular ±0.5 rad/s**。此上限是**厂商 app 通道的上限**，不等于底盘机械上限；本项目若要更高速度，必须另建入口并自行承担限幅责任（并重做 Safety 论证）。
+- 「通信中断是否停车」**本轮未测**（需物理拔插 `/dev/rrc`），列入 `PROJECT_STATUS.md` §6 待办。
+
+---
+
 ## 待补充的决策（尚未确定）
 
 | 议题 | 说明 |

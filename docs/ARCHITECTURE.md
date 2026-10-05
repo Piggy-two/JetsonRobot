@@ -197,6 +197,10 @@ Safety > Control > Skill > Agent
 
 > **Safety 具有最终否决权。**
 
+> ⚠️ **实测约束（2026-10-05，D-020）**：上面这一整套 **Watchdog / Command Timeout / Motor Timeout 全部要由本项目自己实现** —— 厂商底盘**没有任何指令超时保护**：停止发布后电机会保持最后一条速度指令继续转，实测 IMU 振荡幅度 ±0.067 rad/s（对比发 0 时 ±0.0015）。
+>
+> 因此 **Motor Stop 的动作定义为「主动、持续向 `/cmd_vel` 发布零速度」**，而不是「停止发指令」；且 Safety Runtime 必须拥有**独立于 Control Skill 的发布通道**，否则上游一旦卡死，停车指令也发不出去。
+
 ---
 
 ## 7. Hybrid Command Router
