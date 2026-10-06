@@ -19,8 +19,15 @@ camera_driver:
     # 时间戳策略：original | receipt | corrected
     # corrected = 收到时刻 - pipeline_latency，最接近真实曝光时刻
     stamp_source: corrected
-    # 秒。默认取实测帧率 22.6 Hz 的一帧周期；帧率随负载变化，由 diag 持续报出实际值
-    pipeline_latency: 0.045
+    # 秒。2026-10-06 实测标定：在「曝光 -> 本节点 receipt」的延迟均值上扣掉
+    # 一帧栅格的半周期（T/2，事件时刻相对帧栅格采样是均匀的）。
+    # 标定方法：tools/camera_latency_probe.py --topic /embodied/camera/image
+    #           --repeat 6 --settle 2  → 读「汇总」的「戳-下发」均值 D，则
+    #           pipeline_latency = 当前值 + D − T/2（T = 该话题单帧周期）。
+    #   例：2026-10-06 D=+88 ms、T=44 ms、当时 P=45 ms → 45+88−22 = 111 → 取 110 ms。
+    # ⚠️ 这是**随负载变化**的量，不是物理常数：2026-10-05 同一条管线实测仅约 30 ms，
+    #    2026-10-06 为约 110 ms（帧率也从 22.6 Hz 掉到 19 Hz）。换负载/重启栈后应重标。
+    pipeline_latency: 0.110
 
     # 诊断话题发布周期（秒）
     diag_period: 5.0

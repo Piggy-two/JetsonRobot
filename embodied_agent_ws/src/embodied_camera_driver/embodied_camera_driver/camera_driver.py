@@ -67,9 +67,9 @@ class CameraDriver(Node):
         self.declare_parameter('parent_frame', 'camera_link0')
         # original | receipt | corrected
         self.declare_parameter('stamp_source', 'corrected')
-        # 秒；默认 ≈ 22.6 Hz 的一帧周期。设备实际帧率随负载变化，
-        # 故只作保守估计，并由 diag 话题持续报出实际值供校准。
-        self.declare_parameter('pipeline_latency', 0.045)
+        # 秒；2026-10-06 实测标定值（标定方法见 config/camera_driver.yaml）。
+        # ⚠️ 随负载变化，不是物理常数：同一条管线 2026-10-05 实测约 30 ms。
+        self.declare_parameter('pipeline_latency', 0.110)
         self.declare_parameter('publish_static_tf', True)
         # REP-103 光学：z 前 / x 右 / y 下 -> rpy = (-pi/2, 0, -pi/2)
         self.declare_parameter('tf_roll', -math.pi / 2.0)
