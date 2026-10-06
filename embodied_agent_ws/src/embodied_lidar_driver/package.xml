@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_lidar_driver</name>
+  <version>0.1.0</version>
+  <description>
+    JetsonRobot Overlay LiDAR Driver / Primitive 层。
+    厂商 /scan 本身是对的（10 Hz / 360° / frame_id=lidar_frame / TF 已就位），
+    所以本包不做"收口"，而是在原始扫描之上提供查询原语：
+      /embodied/lidar/front（前方扇区最近距离，每帧更新）、
+      ~/sector_min_range、~/path_clear。
+    上层真正要问的是"我这个方向、这个距离内有没有东西"，而不是点云长什么样；
+    做成原语可以避免各自实现踩到"扇区跨 0/2π 接缝"那个静默错误（见 scan_query.py）。
+    ⚠️ 数据陈旧时报 not-clear 而不是 clear —— 不知道不等于安全。
+    本节点不发任何控制指令，也不做避障决策。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>embodied_skills_interfaces</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

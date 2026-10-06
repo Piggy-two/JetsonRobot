@@ -4,9 +4,11 @@
   <name>embodied_skills_interfaces</name>
   <version>0.1.0</version>
   <description>
-    JetsonRobot 项目自己的 Skill 接口定义（Control Skill 层起）。
+    JetsonRobot 项目自己的接口定义（Skill 与 Primitive 都在这里）。
     用项目自己的 .srv 而不是拿 std_msgs/geometry_msgs 硬凑：
-    指令的**语义**（米 / 弧度、坐标系、正方向）必须写在接口里，否则下游只能靠约定俗成。
+    指令的**语义**（米 / 弧度、坐标系、正方向、有效性的边界）必须写在接口里，
+    否则下游只能靠约定俗成。目前含：
+      MoveRelative / Rotate（Control Skill）、SectorMinRange / PathClear（LiDAR Primitive）。
   </description>
   <maintainer email="piggy@example.com">Piggy-two</maintainer>
   <license>Apache-2.0</license>

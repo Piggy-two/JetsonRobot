@@ -53,6 +53,7 @@
 | **Motor Driver 的链路失联处理（D-021 的安全窗口）** | 补上 D-021 明确要求"本项目自己实现"的那一段。**权限边界先说清**：真恢复要 `sudo systemctl restart start_app_node.service`，**Driver 做不到**（需 root），所以本轮实现的是**策略侧**：失联即持续发零并发事件；**若失联那刻底盘"可能还在动"，恢复后置位「需重新使能」——即使上层继续发指令也一律输出零**，直到显式 `~/resume`；启动阶段不算失联（避免每次开机假警报）。**用假遥测制造失联验证（零硬件风险）**：6.0 s 切断遥测 → **8.5 s 检出（恰好 +2.5 s 超时）**、12.0 s 恢复并置位 `rearm_required`、**12~18 s 上层全程发 0.2 m/s 而输出始终为 0**、18.0 s `~/resume` 后才恢复 0.2。单测 14 → **21 项**。决策 **D-025 决策 6** | 2026-10-06 |
 | **Phase 2 首个 Control Skill 落地（`embodied_control_skills` + 接口包）** | 把 Motor Driver 的"速度"包成**确定性动作原语**：`~/move_relative`（机体坐标系平移，x 前/y 左）、`~/rotate`（逆时针为正）、`~/stop`（立即中止）。**同时回答了 D-011 里"跨语言 IPC 具体形式待定"**（**D-026**：用 service 而非 action，理由与升级路径见该决策）。第一版**开环**——`success` 的含义是"速度按时长发完了"，**不是"真的走到位了"**。一次只跑一个动作（运动中再来请求直接拒绝、**不排队**）。**干跑验证 16/16 项通过**：∫vx **0.495** vs 请求 0.500 m、∫wz **1.560** vs 1.5708 rad、斜向 0.297/0.396、超上限请求被拒且**积分 0**、运动中 `~/stop` **0.35 s 内把 1 m 的请求停在 0.045 m**、Motor Driver 不在跑时**拒绝运动**。单测 19 项 | 2026-10-06 |
 | **Safety Runtime 第一版（`embodied_safety_runtime`）** | 项目主张是 `Safety > Control > Skill > Agent`，但此前"停"是**散着**的（Motor Driver 有锁存、Control Skill 有 `~/stop`），**没有"最终否决权"的落点**。本版落地两件事：① **本地安全指令通路**（D-006 / D-024 决策 3）—— 订阅厂商**离线** ASR 的文本，**在本节点内**匹配安全词，**一个字都不经过 LLM，也不经过厂商 `voice_control_*` 节点**（那条路正是 #26 里"碰巧成立"的实现）；② **独立零速通道** —— 锁存期间自己直接向 `/cmd_vel` @10 Hz 发零，**不依赖 Motor Driver 存活**（因为"持续发零"目前只在它里面，它挂了就没人发零，而底盘无指令超时保护 D-020）。🔒 **本节点唯一的发布语句是 `publish(Twist())`，结构上不可能发出非零速度**。急停**锁存**，必须显式 `~/release`。**实测 14/14 通过，且全程 Motor Driver 未启动**。**同轮补上第③件：对 Motor Driver 的停更看门狗** —— 它自己死了既不报错也没人转告，那是**最后一个没有防线的失效模式**（本机无物理急停）；现在**停更 > 2 s 即自动急停并接管发零**，且**Motor Driver 未恢复时拒绝 `~/release`**（解除等于没人发零）。看门狗实测 **12/12 通过**。决策 **D-027** | 2026-10-06 |
+| **LiDAR Primitive（`embodied_lidar_driver`）** | ⚠️ 与相机/电机**不同**：厂商 `/scan` 本身是对的，**没有可收口的**，所以本包做的是**查询原语**而非收口。提供 `/embodied/lidar/front`（前方 ±30° 最近回波，每帧更新）+ `~/sector_min_range` + `~/path_clear`。**核心是躲开一个静默错误**：LD19 的 `angle_min=0`，所以"正前方 ±30°"**不是一个连续下标区间**，而是 330°~360° 与 0°~30° 两段 —— 按下标切片会**漏掉一半扇区**，本实现一律按最短角差判定并有专门单测。**「不知道」绝不报成「安全」**：扫描陈旧时 `path_clear` 报 **false** 而非 true。**对真实雷达做独立重算交叉验证**：`/front` 9.999 Hz、**32/32 帧**与独立重算一致，两个服务**逐位一致**（0.244 m/83 点、跨接缝扇区 0.129 m/167 点）。单测 **30 项**。决策 **D-028** | 2026-10-06 |
 
 ---
 
@@ -68,6 +69,9 @@
   （不依赖 Motor Driver 存活）。⚠️ 按 plan.md 属 Phase 6，**提前开始**，因为 #22「本机没有物理急停」
   这条约束今天就压着。**已含**对 Motor Driver 的停更看门狗（它挂了自动接管发零，且未恢复时拒绝解除）；
   **不含**避障 / 限速 / Agent 侧 Skill 网关。
+- **LiDAR Primitive 已落地**（**D-028**）—— 提供"某方向、某距离内有没有东西"的查询原语
+  （而不是转发点云）。⚠️ 同轮观察到一个**环境条件**：当前雷达 67% 的回波在 0.6 m 以内，
+  `path_clear(±30°, 1 m)` **恒为 false**；成因未定（外部环境 vs 自身结构回波），**需人到场确认**。
 - **硬件侧只剩一项**：**底盘安全侧 —— 急停链路**（需物理操作；**用户已明确暂缓**；遥控优先级用户已降级）。
 - **⚠️ 仍待继承的欠账**：① ~~TF 朝向需实机目视校验一次~~ ✅ **2026-10-06 已通过**（#16 完全闭合，见 §7）；② `/dev/video0` 无稳定符号链接（#17，须在 Overlay 自建 udev 规则）；③ ~~时间戳修正量 `pipeline_latency` 待校准~~ ✅ **2026-10-06 已标定为 110 ms**（但它**随负载变化**，不是常数，换负载后需重标，见 #23 / DEV_NOTES §4）；④ 语音**软件侧**未验收，且**第七轮实测发现唤醒不通**（**#25**，需停厂商 ASR 三节点手动重启才能继续定位，**需人在场/批准**）；⑤ **`voice_control_move` 目前处于停用状态**（第七轮为防止误识别成运动指令而手动停掉，尚未恢复；恢复方式：`sudo systemctl restart start_app_node.service`）。
 - **下一步的第一件事**：见 §6 —— 定 **Phase 1（Driver / Primitive）的接入面**，或者先做**语音软件侧验收**。
@@ -159,6 +163,7 @@
 | **电机 Driver**（Overlay） | ✅ `embodied_motor_driver`（本项目 Driver 层，D-025） | `ros2 launch embodied_motor_driver motor_driver.launch.py`（**默认 `dry_run:=true`，车不会动**；要真动须显式 `dry_run:=false` 且有人看护） | ✅ `/embodied/motor/cmd_vel`（`geometry_msgs/Twist`，本项目的执行器入口） | ✅ `/cmd_vel`（**厂商侧唯一令入点**；dry-run 时改为 `/embodied/motor/cmd_vel_dryrun`）+ `/embodied/motor/status`（`Float64MultiArray` = `[状态码, vx, vy, wz, 指令龄ms, imu龄ms, battery龄ms, 锁存, dry_run, 需重新使能]`，状态码 0=ok 1=no_cmd 2=telemetry_lost 3=stopped **4=rearm_required**）+ `/embodied/motor/events`（`String`，**只在变化时发**：`chassis_link_lost` / `chassis_link_recovered` / `rearm_required` / `rearmed`）+ 服务 `~/stop` / `~/resume`（`std_srvs/Trigger`） | 无 TF 职责 | 🟡 **干跑 + 失联/恢复验证通过**（2026-10-06，**21 项单测** + 假遥测制造链路失联）；⚠️ **真机运动未测**（需人工看护 + 能直接断电） |
 | **Control Skill**（Overlay） | ✅ `embodied_control_skills` + `embodied_skills_interfaces`（Control Skill 层，**D-026**） | `ros2 launch embodied_control_skills control_skills.launch.py`（**前置：Motor Driver 必须已在跑**，否则一律拒绝运动） | ✅ 服务 `~/move_relative`（`embodied_skills_interfaces/MoveRelative`：**机体坐标系** x 前 / y 左，单位米）、`~/rotate`（`Rotate`：弧度，**逆时针为正**）、`~/stop`（`std_srvs/Trigger`，**立即中止、不等待**） | ✅ `/embodied/motor/cmd_vel`（→ Motor Driver）。**空闲时不发** —— 持续发零是 Motor Driver 的职责（D-025） | 无 TF 职责 | 🟡 **干跑验证 16/16 项通过**（2026-10-06，**19 项单测** + 速度积分实测）；⚠️ **真机运动未测**；⚠️ **开环**：`success` ≠ 走到位 |
 | **Safety Runtime**（Overlay） | ✅ `embodied_safety_runtime`（**D-027**，按 plan.md 属 Phase 6，**提前开始**） | `ros2 launch embodied_safety_runtime safety_runtime.launch.py` | ✅ `/asr_node/voice_words`（**厂商离线 ASR 的文本**；本地匹配安全词） | 🔒 `/cmd_vel`（**独立零速通道**，锁存期间 @10 Hz 发零；**唯一的发布语句就是 `publish(Twist())`，只会发零**）+ `/embodied/safety/status`（`Float64MultiArray` = `[是否锁存, 已发零帧数, 触发次数]`）+ `/embodied/safety/events`（`String`：`estop_triggered:<原因>` / `estop_released`）+ 服务 `~/estop` / `~/release`（`std_srvs/Trigger`，**锁存，必须显式解除**） | 无 TF 职责 | 🟢 **离线 + 实测 14/14 通过**（2026-10-06，**45 项单测**；**全程 Motor Driver 未启动**，证明零速通道独立）；**看门狗实测 12/12 通过**（Motor Driver 停更即自动接管，且未恢复时拒绝解除）；⚠️ **本版不含**避障 / 限速 |
+| **LiDAR Primitive**（Overlay） | ✅ `embodied_lidar_driver`（Driver/Primitive 层，**D-028**；⚠️ **不做收口** —— 厂商 `/scan` 本身是对的） | `ros2 launch embodied_lidar_driver lidar_driver.launch.py`（**前置：厂商雷达节点已在跑**） | ✅ `/scan`（`sensor_msgs/LaserScan`，**只读**） | ✅ `/embodied/lidar/front`（`Float64MultiArray` = `[最近距离m, 角度rad, 是否有效, 扇区内有效点数]`，无回波时距离 = −1；**实测 9.999 Hz**）+ 服务 `~/sector_min_range`（`embodied_skills_interfaces/SectorMinRange`）、`~/path_clear`（`PathClear`） | 无 TF 职责（用 `/scan` 已有的 `lidar_frame`） | 🟢 **已通过**（2026-10-06，**30 项单测** + 对**真实雷达**独立重算交叉验证 **逐位一致**）；⚠️ 见 §7 的环境观察 |
 | 语音 | ✅ `xf_mic_asr_offline`（`awake_node.py` / `asr_node.py` / `voice_control`，修正 udev 后实测可正常启动） | `ros2 launch xf_mic_asr_offline mic_init.launch.py`（`MIC_TYPE=xf` 设在 `~/.zshrc`） | `/dev/ring_mic` → `ttyCH341USB1`（Hub 口 `1-2.4.1`，控制串口）+ 声卡 0（`1-2.4.2`，48 kHz S16_LE 2ch 采集） | ASR 文本 / 唤醒事件（**唤醒实测不通**，见 #25）；播放已实测 | `MIC_TYPE=xf`；`ASR_MODE=online`（⚠️ **该变量只被厂商 `large_models` 读取，麦克风栈不读它** —— 见 **#27**，故**不再是"断网不可用"的理由**） | ⚠️ **音频硬件通过，但链路不可用**（2026-10-05 D-022 三项硬件 + 2026-10-06 第七轮实测唤醒不通 #25） |
 | 导航 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ 未测 |
 
@@ -389,6 +394,27 @@ USB3 侧（bus 2）的 4 口 Hub 上无任何设备
 | 仍未恢复时调 `~/release` | ✅ **被拒绝**：`拒绝解除：Motor Driver 状态仍停更 3.5s —— 解除会让底盘无人发零（D-020）` |
 | 恢复后再调 `~/release` | ✅ 成功；解除后 1 s 内 **0 帧** |
 
+**实测 LiDAR Primitive（2026-10-06 · D-028，对**真实雷达**）**
+
+手法：**独立重算** —— 脚本自己订阅 `/scan`、自己按最短角差算一遍，再与节点的答案比。
+只看"节点有没有输出"证明不了它算得对。
+
+| 检查 | 实测 |
+|---|---|
+| `/embodied/lidar/front` 速率 | **9.999 Hz**（与 `/scan` 的 10 Hz 一致） |
+| 流式输出 vs 独立重算 | **32/32 帧**都能对上（对齐最近几帧之一，容忍话题配对错开） |
+| `sector_min_range(0, ±30°, ≤3 m)` | **逐位一致**：节点 `valid=True, 0.244 m, 83 点` = 重算 |
+| 宽扇区（120°，**跨 0/2π 接缝**） | **逐位一致**：`0.129 m / 167 点` |
+| 无扫描数据时 `path_clear` | ✅ `clear=False, range=-1`（**不知道 ≠ 安全**） |
+| 无扫描数据时 `sector_min_range` | ✅ `valid=False` |
+
+> ⚠️ **同轮观察到一个环境条件（不是缺陷，但影响后续）**：当前 504 个点里 **340 个（67%）在 0.6 m 以内**，
+> 且距离随角度**平滑变化**（0° 时 0.251 m、30° 时 0.294、60° 时 0.544 —— 呈 `d/cos θ` 形态，
+> 像是正前方约 **0.25 m 处有一个平整面**），另有 198°~359° 的一圈 0.10~0.28 m。
+> **后果：`path_clear(±30°, 1 m)` 恒为 false** —— 这个原语在当前摆位下给不出有意义的"通畅"。
+> **成因未定**（外部环境 vs 雷达看到机器人自身结构），**需人到场确认**（把车挪到开阔处或吊起来再看这几段在不在）。
+> 这同时提醒：**将来定避障阈值必须基于真实环境实测**，不能拍一个数。
+
 **实测语音盒（2026-10-05 第三轮 · D-022）**
 
 | 项 | 实测值 |
@@ -441,7 +467,7 @@ voice_control_move ──→ /controller/cmd_vel（⚠️ 无限幅那条，见 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **Phase 0** | 环境与硬件启动验收 + 接口清单 | 🚧 **进行中**（**相机已完全收口**；**语音实测唤醒不通，链路不可用**（#25）；急停链路用户已明确暂缓） |
-| **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅ 已落地且无遗留**（`embodied_camera_driver`，D-023）；**电机 Driver ✅ 已落地，干跑验证通过、真机未测**（`embodied_motor_driver`，D-025）；LiDAR Driver 未开始（厂商 `/scan` 目前数据正确、无待收口项，优先级低） |
+| **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅ 已落地且无遗留**（`embodied_camera_driver`，D-023）；**电机 Driver ✅ 已落地，干跑验证通过、真机未测**（`embodied_motor_driver`，D-025）；**LiDAR Primitive ✅ 已落地**（`embodied_lidar_driver`，**D-028** —— 厂商 `/scan` 无待收口项，故本包做的是**查询原语**；对真实雷达独立重算交叉验证**逐位一致**）。**Phase 1 的三个 Driver 至此齐了** |
 | Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | 🚧 **已开始** —— **D-026**：`embodied_control_skills` 落地 `move_relative` / `rotate` / `stop`（**Service 接口 + 项目自己的 `.srv`**），**干跑验证 16/16 通过**。⚠️ **第一版是开环**（`success` = "速度按时长发完了"，**不是走到位**）、**真机运动未测**；`move_forward` 是 `move_relative(x=d, y=0)` 的特例，未单列 |
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
 | Phase 4 | Semantic Skills（`search_object` / `inspect_area` / `patrol_route` / `return_home`） | ⬜ 未开始 |

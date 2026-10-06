@@ -1,0 +1,15 @@
+lidar_driver:
+  ros__parameters:
+    # 厂商雷达话题。它本身是对的（10 Hz / 360° / frame_id=lidar_frame / TF 已就位）——
+    # 本节点只**读**它，不做任何收口。
+    scan_topic: /scan
+
+    # 前方守视扇区：每收到一帧扫描就更新一次
+    front_topic: /embodied/lidar/front
+    front_width: 1.0471975511965976   # 弧度 = 60°（即前方 ±30°）
+    front_max_range: 3.0              # 米；再远对近距避障没有意义
+
+    # 多久没收到扫描即视为"没有可用数据"。
+    # ⚠️ 此时 path_clear 报 **not-clear** —— 不知道不等于安全。
+    # 雷达实测 10 Hz（周期 0.1 s），1 s 已是 10 倍余量。
+    scan_timeout: 1.0

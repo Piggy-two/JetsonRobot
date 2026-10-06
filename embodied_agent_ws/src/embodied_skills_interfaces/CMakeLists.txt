@@ -11,6 +11,8 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/MoveRelative.srv"
   "srv/Rotate.srv"
+  "srv/SectorMinRange.srv"
+  "srv/PathClear.srv"
 )
 
 ament_export_dependencies(rosidl_default_runtime)
