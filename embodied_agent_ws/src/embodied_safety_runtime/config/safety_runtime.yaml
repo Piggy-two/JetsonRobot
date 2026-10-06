@@ -20,5 +20,13 @@ safety_runtime:
     motor_stop_service: /motor_driver/stop
     control_stop_service: /control_skills/stop
 
+    # 对 Motor Driver 的**停更看门狗**：它自己挂了既不报错也没人转告，
+    # 而"持续发零"目前只在它里面（D-025）—— 底盘没有指令超时保护（D-020），
+    # 没人发零它会保持最后速度一直跑。所以本节点必须自己盯着，停更即自动接管发零。
+    # ⚠️ 首次见到之前永不判失联（否则每次启动都先来一次假警报，把真警报淹掉）。
+    watch_motor: true
+    motor_status_topic: /embodied/motor/status
+    motor_watchdog: 2.0          # 秒。Motor Driver 状态正常约 20 Hz，2 s 已是 40 倍余量
+
     status_topic: /embodied/safety/status
     event_topic: /embodied/safety/events

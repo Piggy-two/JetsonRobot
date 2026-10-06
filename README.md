@@ -158,7 +158,7 @@ ros2 action list
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
 | Phase 4 | Semantic Skills（`search_object` / `inspect_area` / `patrol_route` / `return_home`） | ⬜ 未开始 |
 | Phase 5 | Voice System（Wake Word / VAD / ASR / TTS） | ⬜ 未开始 |
-| Phase 6 | Agent Runtime（Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway） | 🚧 **Safety 部分提前开始**（**D-027**：`embodied_safety_runtime` 第一版——**本地安全指令通路**（不经过 LLM、不经过厂商节点）+ **独立零速通道**（不依赖 Motor Driver 存活）。因为**本机没有物理急停**，#22 这条约束今天就压着，不必等 Agent 层建好）。其余未开始 |
+| Phase 6 | Agent Runtime（Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway） | 🚧 **Safety 部分提前开始**（**D-027**：`embodied_safety_runtime` 第一版——**本地安全指令通路**（不经过 LLM、不经过厂商节点）+ **独立零速通道**（不依赖 Motor Driver 存活）+ **Motor Driver 停更看门狗**（它挂了自动接管、未恢复时拒绝解除）。因为**本机没有物理急停**，#22 这条约束今天就压着，不必等 Agent 层建好）。其余未开始 |
 | Phase 7 | Hybrid LLM（Rule Engine + Cloud LLM + 预留 Local Small LLM） | ⬜ 未开始 |
 
 > **仓库现状**：包含设计方案（`docs/plan.md`）、Phase 0 验收工装（`tools/`）、以及 **Overlay 业务代码工作区 `embodied_agent_ws/`**（首个节点为相机 Driver `embodied_camera_driver`，2026-10-05 落地，**D-023**；第二个是电机 Driver `embodied_motor_driver`，2026-10-06 落地，**D-025**；随后是 Control Skill `embodied_control_skills` 与接口包 `embodied_skills_interfaces`，**D-026**；再后是 Safety Runtime `embodied_safety_runtime`，**D-027**）。后续业务代码按上表顺序在该工作区内引入。

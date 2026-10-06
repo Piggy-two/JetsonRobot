@@ -25,8 +25,16 @@
     🔒 **本节点唯一的发布语句就是 `publish(Twist())`** —— 它在结构上
     **不可能**发出任何非零速度。这不是"约定"，是代码里只有这一个出口。
 
-⚠️ **本版不做**：避障、速度/区域限制、Agent 侧的 Skill 网关、对 Motor Driver
-   存活性的监视（"Motor Driver 挂了就自动接管"）。这些是后续增量。
+**三、对 Motor Driver 的停更看门狗（`motor_status_topic` / `motor_watchdog`）**
+第二件事只解决了"**已经**知道要停"的情况。还有一种是"**根本没人知道要停**"：
+Motor Driver 进程自己死了 —— 它既不报错、也没人转告。这时底盘会保持最后速度一直跑。
+
+所以本节点监视 Motor Driver 的状态话题：**它停更超过 `motor_watchdog` 秒即自动急停**，
+由本节点接管发零。这就是"独立通道"存在的意义真正兑现的时刻。
+
+⚠️ **首次见到之前永不判失联**（`watchdog.py`）—— 否则每次启动都会先来一次假警报。
+
+⚠️ **本版不做**：避障、速度/区域限制、Agent 侧的 Skill 网关。
 
 ⚠️ 触发后的急停是**锁存**的：必须显式调 `~/release` 才能解除（`estop.py` 的 `EStopLatch`）。
 """
@@ -40,6 +48,7 @@ from std_srvs.srv import Trigger
 
 from embodied_safety_runtime.estop import (
     DEFAULT_SAFETY_PHRASES, EStopLatch, is_safety_command)
+from embodied_safety_runtime.watchdog import StalenessWatchdog
 
 
 class SafetyRuntime(Node):
@@ -51,6 +60,10 @@ class SafetyRuntime(Node):
         self.declare_parameter('zero_channel_topic', '/cmd_vel')
         self.declare_parameter('zero_rate', 10.0)
         self.declare_parameter('safety_phrases', DEFAULT_SAFETY_PHRASES)
+        # 对 Motor Driver 的停更看门狗：**它挂了就没人发零了**，必须自动接管
+        self.declare_parameter('watch_motor', True)
+        self.declare_parameter('motor_status_topic', '/embodied/motor/status')
+        self.declare_parameter('motor_watchdog', 2.0)
         # best-effort：把下游的锁存也打开（急停不依赖它们）
         self.declare_parameter('motor_stop_service', '/motor_driver/stop')
         self.declare_parameter('control_stop_service', '/control_skills/stop')
@@ -70,6 +83,13 @@ class SafetyRuntime(Node):
         self.event_pub = self.create_publisher(String, g('event_topic'), 10)
 
         self.create_subscription(String, g('voice_topic'), self.on_voice, 10)
+        if g('watch_motor'):
+            self.motor_wd = StalenessWatchdog(float(g('motor_watchdog')))
+            self.create_subscription(Float64MultiArray, g('motor_status_topic'),
+                                     self.on_motor_status, 10)
+        else:
+            self.motor_wd = None
+            self.get_logger().warn('watch_motor=false：**不会**在 Motor Driver 挂掉时自动接管')
 
         self.create_service(Trigger, '~/estop', self.on_estop)
         self.create_service(Trigger, '~/release', self.on_release)
@@ -85,6 +105,10 @@ class SafetyRuntime(Node):
             f'Safety Runtime 启动 | 语音安全词 <- {g("voice_topic")} | '
             f'独立零速通道 -> {g("zero_channel_topic")} @ {rate:.0f} Hz（**只发零**）| '
             f'安全词 {len(self.phrases)} 条')
+        if g('watch_motor'):
+            self.get_logger().info(
+                f'看门狗：监视 {g("motor_status_topic")}，停更 > {g("motor_watchdog")}s '
+                '即自动接管发零')
         self.get_logger().warn(
             '⚠️ 本版**不含**避障 / 限速 / 对下游存活的监视；急停是锁存的，'
             '必须显式调 ~/release 才能解除。')
@@ -99,6 +123,9 @@ class SafetyRuntime(Node):
             self._trigger(f'voice:{phrase}')
         else:
             self.get_logger().debug(f'语音文本（非安全词）：{msg.data!r}')
+
+    def on_motor_status(self, _msg):
+        self.motor_wd.on_signal(time.monotonic())
 
     def _trigger(self, reason):
         changed = self.latch.trigger(reason)
@@ -128,6 +155,19 @@ class SafetyRuntime(Node):
         return res
 
     def on_release(self, _req, res):
+        # ⚠️ Motor Driver 还没活过来的话，**不允许解除** ——
+        #    解除就等于本节点停止发零，而那时没有别人在发零，底盘会保持最后速度跑下去。
+        #    与其"解除了又立刻重新锁存"（看起来像 bug），不如明确拒绝并说清原因。
+        if self.motor_wd is not None:
+            now = time.monotonic()
+            if self.motor_wd.expired(now):
+                age = self.motor_wd.age(now)
+                res.success = False
+                res.message = (f'拒绝解除：Motor Driver 状态仍停更 {age:.1f}s —— '
+                               '解除会让底盘无人发零（D-020）。先让它恢复。')
+                self.get_logger().error(res.message)
+                return res
+
         changed = self.latch.release()
         if changed:
             self._emit('estop_released')
@@ -140,18 +180,30 @@ class SafetyRuntime(Node):
     # ---------- 独立零速通道 ----------
 
     def tick(self):
+        now = time.monotonic()
+        # 先看门狗再发零：Motor Driver 挂了就自动接管，别等"有人告诉我"。
+        if (self.motor_wd is not None and not self.latch.latched
+                and self.motor_wd.expired(now)):
+            age = self.motor_wd.age(now)
+            self.get_logger().error(
+                f'★ Motor Driver 状态已停更 {age:.1f}s —— 判定它已退出，**自动接管发零**。'
+                '（底盘没有指令超时保护（D-020），没人发零它会保持最后速度一直跑。）')
+            self._trigger('motor_driver_lost')
+
         if self.latch.latched:
             self._publish_zero()
-        self._publish_status()
+        self._publish_status(now)
 
     def _publish_zero(self):
         self.zero_pub.publish(Twist())      # 🔒 全节点唯一的发布语句，只发零
         self._zero_frames += 1
 
-    def _publish_status(self):
+    def _publish_status(self, now):
+        age = None if self.motor_wd is None else self.motor_wd.age(now)
         m = Float64MultiArray()
         m.data = [1.0 if self.latch.latched else 0.0,
-                  float(self._zero_frames), float(self._triggers)]
+                  float(self._zero_frames), float(self._triggers),
+                  -1.0 if age is None else age * 1000.0]
         self.status_pub.publish(m)
 
     def _emit(self, name):

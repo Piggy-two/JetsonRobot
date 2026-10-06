@@ -12,6 +12,10 @@
   ② **独立的零速通道**：锁存期间自己直接向 `/cmd_vel` @10 Hz 发 `Twist()`（全零）。
      ⚠️ 这一条**不依赖 Motor Driver 存活** —— 因为"持续发零"目前只在 Motor Driver 里，
      它自己挂了就没人发零了，而底盘**没有指令超时保护**（D-020）。
+  ③ **对 Motor Driver 的停更看门狗**：它自己挂了既不报错也没人转告，
+     而本节点不可能"等别人告诉我该停"。所以自己盯着 `/embodied/motor/status`，
+     **停更 > `motor_watchdog`（默认 2 s）即自动急停并接管发零**。
+     ⚠️ 首次见到之前永不判失联（否则每次启动先来一次假警报，把真警报淹掉）。
 
 手工触发 / 解除（验收与测试用）：
     ros2 service call /safety_runtime/estop   std_srvs/srv/Trigger "{}"
@@ -28,8 +32,7 @@
 ⚠️ 解除本节点的锁存**不会**自动解除 Motor Driver / Control Skill 各自的锁存，
    它们各有自己的 `~/resume`。三道锁是**独立**的，这是刻意的。
 
-本版**不含**：避障、速度/区域限制、Agent 侧 Skill 网关、对 Motor Driver 存活性的监视
-（"它挂了就自动接管"）。
+本版**不含**：避障、速度/区域限制、Agent 侧 Skill 网关。
 """  # noqa: D205
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -47,11 +50,17 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'voice_topic', default_value='/asr_node/voice_words',
             description='厂商离线 ASR 的文本输出。测试时可指向假话题以喂合成文本'),
+        DeclareLaunchArgument(
+            'motor_status_topic', default_value='/embodied/motor/status',
+            description='看门狗监视的话题。测试时可指向假话题以模拟 Motor Driver 挂掉'),
         Node(
             package='embodied_safety_runtime',
             executable='safety_runtime',
             name='safety_runtime',
             output='screen',
-            parameters=[cfg, {'voice_topic': LaunchConfiguration('voice_topic')}],
+            parameters=[cfg, {
+                'voice_topic': LaunchConfiguration('voice_topic'),
+                'motor_status_topic': LaunchConfiguration('motor_status_topic'),
+            }],
         ),
     ])
