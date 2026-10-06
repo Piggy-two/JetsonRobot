@@ -165,6 +165,11 @@ LiDAR 丢帧免疫，且与电机控制回路完全独立。
 > 判据也还是同一个 —— **`ros2 topic info` 数发布者** + `ps` 看 `lstart` / 父进程链。
 > ⚠️ **教训补充：「停掉任务」不等于「进程没了」** —— 凡是用后台任务/包装器起的 ROS 节点，
 > 收工时都要按上面两条**再确认一次**，别相信停止命令的返回值。
+>
+> **2026-10-06 同一坑的第三种形态**：`for p in $(pgrep -f "…motor_driver.launch…"); do kill $p; done`
+> —— `pgrep -f` 匹配的是**完整命令行**，而这条命令自己的命令行里就写着 `motor_driver.launch`，
+> 于是**把自己所在的 shell 也杀了**（退出码 144），后面的启动根本没执行。
+> **判据不变：先列 PID、看清是谁，再杀。**
 
 ### 坑 4：`.gitignore` 里一个裸的 `src/` 会**静默吞掉**自己的源码
 
@@ -249,6 +254,25 @@ LiDAR 丢帧免疫，且与电机控制回路完全独立。
   1. **判断一个 Python 节点是否卡住，不能靠"它没打印日志"**，要找一个**必然晚于疑点创建的东西**
      （服务 / 话题 / 定时器）作为存在性证据；
   2. 要看实时日志，就**自己手动起、带 `PYTHONUNBUFFERED=1`**，别指望 systemd 那侧。
+
+### 坑 9：`ros2 launch` 的**未声明参数会被静默忽略**
+
+- **现象**：想给 Motor Driver 做"链路失联"实验，把存活判据话题指向假话题：
+
+  ```bash
+  ros2 launch embodied_motor_driver motor_driver.launch.py \
+      imu_topic:=/embodied/motor/test/imu battery_topic:=/embodied/motor/test/battery
+  ```
+
+  结果**实验完全没生效**：脚本切断了假遥测，节点却毫无反应 ——
+  因为**它订阅的还是真的 `/ros_robot_controller/imu_raw`**，而真遥测一直新鲜，
+  "失联"根本没发生。表面上一切正常，只有一个"什么都没发生"的结果。
+- **原因**：`ros2 launch` 里 `名字:=值` **只有在 launch 文件用 `DeclareLaunchArgument`
+  声明过才会传进去**；**没声明的会被忽略**（不报错）。我写那个 launch 时只声明了 `dry_run`。
+- **怎么发现的**：`ros2 node info /motor_driver` 看它实际订阅了哪些话题 —— 一眼看出还是真话题。
+- **教训**：**用 `ros2 launch` 传参之后，必须用 `ros2 node info` / `ros2 topic list` 确认它真的生效。**
+  "命令行没报错"不等于"参数传进去了"。
+  （这与坑 2、坑 3 是同一条元教训：**别相信"看起来成功"，去查实际状态。**）
 
 ---
 

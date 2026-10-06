@@ -32,10 +32,10 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Imu
-from std_msgs.msg import UInt16, Float64MultiArray
+from std_msgs.msg import UInt16, Float64MultiArray, String
 from std_srvs.srv import Trigger
 
-from embodied_motor_driver.safety_gate import MotorSafetyGate
+from embodied_motor_driver.safety_gate import LINK_LOST, MotorSafetyGate
 
 
 class MotorDriver(Node):
@@ -48,6 +48,7 @@ class MotorDriver(Node):
         self.declare_parameter('dry_run', True)
         self.declare_parameter('dry_run_topic', '/embodied/motor/cmd_vel_dryrun')
         self.declare_parameter('status_topic', '/embodied/motor/status')
+        self.declare_parameter('event_topic', '/embodied/motor/events')
         # 存活判据（D-021）：只认这两个
         self.declare_parameter('imu_topic', '/ros_robot_controller/imu_raw')
         self.declare_parameter('battery_topic', '/ros_robot_controller/battery')
@@ -74,6 +75,8 @@ class MotorDriver(Node):
         self.pub = self.create_publisher(Twist, self.out_topic, 1)
         self.status_pub = self.create_publisher(
             Float64MultiArray, g('status_topic'), 10)
+        # 链路事件：只在**变化**时发，便于上层订阅而不必轮询 status
+        self.event_pub = self.create_publisher(String, g('event_topic'), 10)
 
         # ---- 订阅 ----
         self.create_subscription(Twist, g('input_topic'), self.on_cmd, 1)
@@ -89,6 +92,8 @@ class MotorDriver(Node):
         self.create_timer(1.0 / rate, self.tick)
 
         self._last_state = None
+        self._last_link = None
+        self._last_needs_rearm = False
         self._last_clamp_log = 0.0
 
         self.get_logger().info(
@@ -144,7 +149,8 @@ class MotorDriver(Node):
     # ---------- 主循环 ----------
 
     def tick(self):
-        vx, vy, wz, state, age_cmd, age_imu, age_batt = self.gate.step(time.monotonic())
+        (vx, vy, wz, state, age_cmd, age_imu, age_batt,
+         link, needs_rearm) = self.gate.step(time.monotonic())
 
         t = Twist()
         t.linear.x = float(vx)
@@ -160,8 +166,34 @@ class MotorDriver(Node):
             -1.0 if age_batt is None else age_batt * 1000.0,
             1.0 if self.gate.latched else 0.0,
             1.0 if self.dry_run else 0.0,
+            1.0 if needs_rearm else 0.0,
         ]
         self.status_pub.publish(m)
+
+        # ---- 链路事件：只在**变化**时发，便于上层/日志订阅，不用轮询 status ----
+        if link != self._last_link:
+            if link == LINK_LOST:
+                self._emit_event('chassis_link_lost')
+                self.get_logger().error(
+                    '底盘链路失联：遥测停发。⚠️ 底盘此时可能仍保持最后一条速度（D-020），'
+                    '而重新 bind 不能自恢复 —— 真恢复需要 '
+                    '`sudo systemctl restart start_app_node.service`（D-021）。'
+                    '本节点会持续发零，直到显式 /resume。')
+            elif self._last_link == LINK_LOST:
+                self._emit_event('chassis_link_recovered')
+                self.get_logger().warn('底盘链路恢复。')
+            self._last_link = link
+
+        if needs_rearm != self._last_needs_rearm:
+            if needs_rearm:
+                self._emit_event('rearm_required')
+                self.get_logger().error(
+                    '失联发生在底盘"可能还在动"的时刻 → 已置位「需重新使能」。'
+                    '在显式 /resume 之前，即使上层继续发指令也**一律输出零**。')
+            else:
+                self._emit_event('rearmed')
+                self.get_logger().warn('「需重新使能」已清除。')
+            self._last_needs_rearm = needs_rearm
 
         if state != self._last_state:
             if state == self.gate.STATE_OK:
@@ -171,6 +203,11 @@ class MotorDriver(Node):
                     f'状态 -> {state}（输出零速度；'
                     f'imu 龄 {m.data[5]:.0f} ms / battery 龄 {m.data[6]:.0f} ms）')
             self._last_state = state
+
+    def _emit_event(self, name):
+        e = String()
+        e.data = name
+        self.event_pub.publish(e)
 
 
 def main(args=None):

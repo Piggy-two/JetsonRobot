@@ -11,11 +11,14 @@ motor_driver:
     dry_run_topic: /embodied/motor/cmd_vel_dryrun
 
     status_topic: /embodied/motor/status
+    # 链路事件（**只在变化时**发，便于上层订阅而不必轮询 status）：
+    #   chassis_link_lost / chassis_link_recovered / rearm_required / rearmed
+    event_topic: /embodied/motor/events
 
-    # 存活判据**只认这两个**（D-021）：
-    # 断线时 /odom 照发 28.5 Hz、桥进程也照活，只有 imu_raw / battery 会停。
-    imu_topic: /ros_robot_controller/imu_raw
-    battery_topic: /ros_robot_controller/battery
+    # ⚠️ 存活判据话题（`imu_topic` / `battery_topic`）**不在这里配**，见 launch 文件的
+    #    DeclareLaunchArgument —— 免得两处默认值打架。
+    #    判据本身**只认 `imu_raw` / `battery`**（D-021）：断线时 `/odom` 照发 28.5 Hz、
+    #    桥进程也照活，只有这两个会停。
 
     # 持续发布频率。**空闲时也发**（发零）—— 底盘无指令超时保护，停止发布 ≠ 停车（D-020）
     publish_rate: 20.0
