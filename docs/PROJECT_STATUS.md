@@ -49,13 +49,15 @@
 | **底盘运动验收通过** | 人工看护下实测六向运动：前进/后退/左移/右移/左转/右转方向全部正确，轮速与麦轮解算**逐位吻合**（0.1 m/s → 0.3979 rps；0.3 rad/s → 0.2081 rps）；`/cmd_vel` 限幅实测生效（指令 0.30 → 实际 0.20 m/s）；IMU 陀螺仪独立佐证原地旋转为真实运动。新增验收工装 `tools/phase0_chassis_motion_acceptance.py`。**同轮发现底盘无指令超时保护**（见 #18 / **D-020**） | 2026-10-05 |
 | **通信中断模拟（S2 冻结 + S3 真断线）** | ① **S2**：用**独立于桥节点的 LiDAR 转速计**测得指令断裂 7 s 期间底盘仍以 **0.1373 rad/s 旋转 = 正常指令的 105%**（静止基线 0.0000），而显式发 0 后立刻落回 0.0064 → **停车 100% 依赖上层主动发零**；② **S3**：USB `unbind` 底盘口后 `/odom` **照常发布 28.529 Hz** 而 `imu_raw`/`battery` **停发**、**仅重新 bind 不自恢复**（必须 `systemctl restart start_app_node.service`）；③ 确认**本机无物理急停**（`button_scan.py` 的 `halt` 被注释掉）。新增验收工装 `tools/lidar_rotation_probe.py`（丢帧免疫，双算法自检）。决策 **D-021** | 2026-10-05 |
 | **相机与语音盒硬件验收** | ① **相机**：用 `v4l2` 的 `brightness`（ISP 数字偏移、逐帧立即生效）当"传感器端打光"探针，实测**内容端到端延迟仅约一帧**（`image_compressed` 19~44 ms；`image_raw` 多出的约 90 ms 是订阅端解析 614 KB 的开销）—— 硬件确认可用；同时坐实 **`header.stamp` 比真实采集时刻早 0.72 s**（内容新鲜、时间戳陈旧），并逐条排除订阅积压 / 仿真时钟 / 冻结换算基准 / 双发布者 / USB 带宽 / 设备档位六种解释（机制未定，`usb_cam` 本机无源码）；确认 22.6 Hz 是**主机侧丢帧**。② **语音盒**：控制串口 `/dev/ttyCH341USB1` 可用；card 0 **录音 + 播放均通过**（用户确认听到 440 Hz 提示音）；`/dev/ring_mic` 根因是**过期 udev 路径**（规则写 `1-2.3.1`，实际 `1-2.4.1`），**已修正**并验证厂商 ASR 栈正常启动。决策 **D-022** | 2026-10-05 |
+| **Phase 1 第二个 Driver：`embodied_motor_driver`（Motor Driver）** | 把**四条安全硬约束封进代码**（D-020 主动持续发零 / D-021 存活判据只用 `imu_raw`+`battery` / #19 自己再限幅 / #22 锁存停车），上层不必各自记得。判断逻辑抽到纯 Python 的 `safety_gate.py`，**14 项离线单测全过**。**默认 `dry_run=true`：不向 `/cmd_vel` 发布任何东西**（本机无物理急停，"能真动"必须显式打开）。干跑实测：`/cmd_vel` 发布者数 **0**、干跑话题 **19.998 Hz** 持续发零、超限指令被钳到 `(+0.2, -0.2, +0.5)`、停发指令 0.5 s 归零、`~/stop` 锁存 / `~/resume` 解除、启动时未收到遥测即判 `telemetry_lost`。决策 **D-025** | 2026-10-06 |
 
 ---
 
 ## 4. 正在进行
 
 - **Overlay Workspace 已建立，并落地第一个业务代码节点。** `embodied_agent_ws/` 建在**仓库内**，内含 `embodied_camera_driver`（Driver 层，D-023）：在同一个节点内收口 #23（重新打时间戳）与 #16（补发 TF `camera_link0 → camera`）。已编译、已实跑、已实测验证（详见 §7 与 DEVELOPMENT_LOG 第四轮）。**项目由此进入「有业务代码」阶段。**
-- **硬件侧只剩一项**：**底盘安全侧 —— 急停链路**（需物理操作；遥控优先级用户已降级）。
+- **Phase 1 已落地第二个 Driver：`embodied_motor_driver`（D-025）**，把**四条安全硬约束封进代码**（主动持续发零 / 存活判据只用 `imu_raw`+`battery` / 自己再限幅 / 锁存停车），判断逻辑抽成纯 Python 的 `safety_gate.py`（**14 项离线单测**）。**默认 `dry_run=true`，不向 `/cmd_vel` 发布任何东西**（本机无物理急停）。干跑实测通过；**真机运动未测**，需人工看护。
+- **硬件侧只剩一项**：**底盘安全侧 —— 急停链路**（需物理操作；**用户已明确暂缓**；遥控优先级用户已降级）。
 - **⚠️ 仍待继承的欠账**：① ~~TF 朝向需实机目视校验一次~~ ✅ **2026-10-06 已通过**（#16 完全闭合，见 §7）；② `/dev/video0` 无稳定符号链接（#17，须在 Overlay 自建 udev 规则）；③ ~~时间戳修正量 `pipeline_latency` 待校准~~ ✅ **2026-10-06 已标定为 110 ms**（但它**随负载变化**，不是常数，换负载后需重标，见 #23 / DEV_NOTES §4）；④ 语音**软件侧**未验收，且**第七轮实测发现唤醒不通**（**#25**，需停厂商 ASR 三节点手动重启才能继续定位，**需人在场/批准**）；⑤ **`voice_control_move` 目前处于停用状态**（第七轮为防止误识别成运动指令而手动停掉，尚未恢复；恢复方式：`sudo systemctl restart start_app_node.service`）。
 - **下一步的第一件事**：见 §6 —— 定 **Phase 1（Driver / Primitive）的接入面**，或者先做**语音软件侧验收**。
 
@@ -105,6 +107,10 @@
 
 1. ~~建立 Overlay Workspace（`embodied_agent_ws`）~~ ✅ **2026-10-05 已完成** —— 建在**仓库内**，已落地首个业务代码节点 `embodied_camera_driver`（D-023）。Phase 1 的 Driver 层、#16 的 TF 补救、#23 的重新打时间戳、#17 的相机 udev 规则，今后都落在这里（**不得修改厂商 `~/ros2_ws`**，CLAUDE.md §2/§8）。
    - ~~遗留两个一次性小动作~~ ✅ **两个都已完成**：① ~~实机目视校验 TF 朝向~~ ✅ 2026-10-06 通过；② ~~校准 `pipeline_latency`~~ ✅ 45 ms → **110 ms**（方法见 §7）。
+   - ✅ **2026-10-06：Phase 1 第二个 Driver `embodied_motor_driver` 已落地**（**D-025**，干跑验证通过、14 项离线单测全过）。**它的下一步**：
+     - 🔴 **真机运动测试** —— **需人工看护 + 人必须能直接断电**（本机无物理急停），且必须显式 `dry_run:=false`；同时顺带做 `odom_publisher` 往返验证。
+     - ⬜ **断线自恢复** —— D-021 明确要求"本项目自己实现"。现在只做到"检测到失联就归零"，**不尝试恢复**。
+     - ⬜ 真机测试时确认：`~/stop` 锁存的停车**在底盘侧确实生效**（厂商侧无超时保护，这条只能实测）。
 2. **底盘安全侧验收**（**Phase 0 剩下的硬骨头**，需物理操作 + 人工看护）：
    - ~~通信中断停车~~ ✅ **2026-10-05 已完成**（S2 冻结 + S3 真断线；结论见 #18 / #21 / **D-020 / D-021**）。**注**：「运动中拔线」这一更极端场景**刻意未做**（按构造不安全，理由见 D-020）。
    - **急停链路**（**当前优先级最高，也是 Phase 0 唯一剩下的硬件项**）—— `/ros_robot_controller/button` 的物理按键行为，以及断电响应。⚠️ 已知本机**没有物理急停**（#22），此项的核心是**确认到底有没有可用的硬件级停车手段**。
@@ -136,6 +142,7 @@
 | LiDAR | ✅ **LD19**（`ldlidar_stl_ros2`，230400） | `peripherals/launch/include/ldlidar_LD19.launch.py`（由 `LIDAR_TYPE=LD19` 选择） | ✅ `/dev/lidar` → `ttyCH341USB0`（Hub 口 `1-2.1`） | ✅ `/scan`（`sensor_msgs/LaserScan`），**实测 10.00 Hz** | 设备 `/dev/lidar`；`frame_id=lidar_frame`；TF `base_link → lidar_frame` 静态 `[0.011, 0, 0.136]` | ✅ **通过**（2026-09-28 实测，数据见下） |
 | 相机 | 单目 UVC（内核 `uvcvideo`）+ 厂商 `usb_cam` 分支 | 厂商 `peripherals/launch/depth_camera.launch.py`（`DEPTH_CAMERA_TYPE=usb_cam` → `usb_cam_node_exe`，见 D-019） | ✅ `/dev/video0`（YUYV 640×480；设备协商 30 fps 但**主机侧实际约 22.6 Hz 且随负载变化**，#15） | ✅ `/depth_cam/rgb0/image_raw`（**1 个发布者**，`encoding=yuv422_yuy2`，唯一订阅者 `/yolo`）+ `/depth_cam/rgb0/camera_info`；**端到端延迟 ≈ 一帧（20~45 ms）** | 设备 `/dev/video0`（**无稳定符号链接**，#17）；图像 `frame_id=camera` → **Driver 已补 TF `camera_link0 → camera`**（D-023） | ✅ **硬件通过 + Driver 已收口且朝向已校验**（2026-10-05 ~ 10-06，D-022 / D-023） |
 | **相机 Driver**（Overlay） | ✅ `embodied_camera_driver`（本项目 Driver 层，D-023） | `ros2 launch embodied_camera_driver camera_driver.launch.py`（**须在 bash 中**先 source 厂商再 source 本 Overlay） | ✅ `/depth_cam/rgb0/image_raw`（订阅 BEST_EFFORT / depth=1，只取最新帧） | ✅ **`/embodied/camera/image`**（帧号已重打，`frame_id=camera`，**实测 20.9 Hz ≈ 1:1 透传**）+ **`/embodied/camera/diag`**（`Float64MultiArray` = `[帧数, 帧率Hz, 原始戳陈旧量ms, 施加修正量ms, 最大陈旧量ms]`） | ✅ **TF `camera_link0 → camera`**（静态，REP-103 光学 rpy `(-π/2, 0, -π/2)`）；实测 `base_footprint → base_link → camera_link0 → camera` **端到端可解析** | ✅ **已通过且无遗留**（2026-10-05，D-023）；2026-10-06：`pipeline_latency` **标定为 110 ms**（残差 ≈ −9 ms）+ **TF 朝向实机校验通过**（无镜像/无滚转，参数无需修正，见 §7） |
+| **电机 Driver**（Overlay） | ✅ `embodied_motor_driver`（本项目 Driver 层，D-025） | `ros2 launch embodied_motor_driver motor_driver.launch.py`（**默认 `dry_run:=true`，车不会动**；要真动须显式 `dry_run:=false` 且有人看护） | ✅ `/embodied/motor/cmd_vel`（`geometry_msgs/Twist`，本项目的执行器入口） | ✅ `/cmd_vel`（**厂商侧唯一令入点**；dry-run 时改为 `/embodied/motor/cmd_vel_dryrun`）+ `/embodied/motor/status`（`Float64MultiArray` = `[状态码, vx, vy, wz, 指令龄ms, imu龄ms, battery龄ms, 锁存, dry_run]`，状态码 0=ok 1=no_cmd 2=telemetry_lost 3=stopped）+ 服务 `~/stop` / `~/resume`（`std_srvs/Trigger`，**锁存**） | 无 TF 职责 | 🟡 **干跑验证通过**（2026-10-06，14 项单测 + 实机干跑）；⚠️ **真机运动未测**（需人工看护 + 能直接断电） |
 | 语音 | ✅ `xf_mic_asr_offline`（`awake_node.py` / `asr_node.py` / `voice_control`，修正 udev 后实测可正常启动） | `ros2 launch xf_mic_asr_offline mic_init.launch.py`（`MIC_TYPE=xf` 设在 `~/.zshrc`） | `/dev/ring_mic` → `ttyCH341USB1`（Hub 口 `1-2.4.1`，控制串口）+ 声卡 0（`1-2.4.2`，48 kHz S16_LE 2ch 采集） | ASR 文本 / 唤醒事件（**唤醒实测不通**，见 #25）；播放已实测 | `MIC_TYPE=xf`；`ASR_MODE=online`（⚠️ **该变量只被厂商 `large_models` 读取，麦克风栈不读它** —— 见 **#27**，故**不再是"断网不可用"的理由**） | ⚠️ **音频硬件通过，但链路不可用**（2026-10-05 D-022 三项硬件 + 2026-10-06 第七轮实测唤醒不通 #25） |
 | 导航 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ 未测 |
 
@@ -298,6 +305,19 @@ USB3 侧（bus 2）的 4 口 Hub 上无任何设备
 
 > ⚠️ **本次校验的边界（不夸大）**：它确证的是**无镜像、无滚转（roll）、左右与上下方向正确** —— 即「相机被装反 / 装歪 90°」这类**会毁掉 3D 投影**的错误已被排除。但它**没有精确测定 pitch（俯仰）**：相机若相对机身微微仰/俯，这组判据看不出来（场景中地面出现在光心下方，只说明「相机大体水平」）。pitch 的最终依据仍是**厂商 URDF 的 `rpy=0`**（`base_link → camera_link0`），本项目未改动它。
 
+**实测电机 Driver（2026-10-06 · D-025，干跑模式，车未动）**
+
+| 项 | 实测 |
+|---|---|
+| 编译 / 单测 | `colcon build` 通过；`pytest test/test_safety_gate.py` **14 项全过**（不需要 ROS、不需要底盘） |
+| **`/cmd_vel` 发布者数** | **0** —— 干跑期间也必须是 0，这是"车在物理上动不了"的直接证据 |
+| 持续发布（D-020） | 干跑话题 **19.998 Hz** 连续发布，空闲时 `Twist` 全零（**不是"有指令才发"**） |
+| 限幅（#19） | 发 `(+0.9, −0.5, +3.0)` → 日志 `指令被限幅 ... -> (+0.200, -0.200, +0.500)`；干跑话题上未出现任何超限值 |
+| 指令超时（D-020） | 停发指令 0.5 s 后 `状态 -> no_cmd` 并归零 |
+| 锁存停车 | `~/stop` → `状态 -> stopped（输出零速度）`；`~/resume` → `状态 -> ok` |
+| 遥测失联（D-021） | 启动时（遥测尚未到达）即 `状态 -> telemetry_lost` 且输出零 |
+| **顺带实测的遥测速率** | `imu_raw` **46.9 Hz**、`battery` **0.95 Hz（周期 1.05 s）** → `telemetry_timeout` 取 **2.5 s**（按最慢那一路留 2 倍余量，见 D-025 决策 2） |
+
 **实测语音盒（2026-10-05 第三轮 · D-022）**
 
 | 项 | 实测值 |
@@ -350,7 +370,7 @@ voice_control_move ──→ /controller/cmd_vel（⚠️ 无限幅那条，见 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **Phase 0** | 环境与硬件启动验收 + 接口清单 | 🚧 **进行中**（**相机已完全收口**；**语音实测唤醒不通，链路不可用**（#25）；急停链路用户已明确暂缓） |
-| **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅ 已落地**（`embodied_camera_driver`，D-023）；Motor / LiDAR Driver 未开始 |
+| **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅ 已落地且无遗留**（`embodied_camera_driver`，D-023）；**电机 Driver ✅ 已落地，干跑验证通过、真机未测**（`embodied_motor_driver`，D-025）；LiDAR Driver 未开始（厂商 `/scan` 目前数据正确、无待收口项，优先级低） |
 | Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | ⬜ 未开始 |
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
 | Phase 4 | Semantic Skills（`search_object` / `inspect_area` / `patrol_route` / `return_home`） | ⬜ 未开始 |

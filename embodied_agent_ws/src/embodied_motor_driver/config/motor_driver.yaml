@@ -1,0 +1,34 @@
+motor_driver:
+  ros__parameters:
+    # 上层 Skill 的接入点（本项目自己的话题，见 D-016 的细化）
+    input_topic: /embodied/motor/cmd_vel
+    # 厂商底盘的唯一入口。⚠️ 只用这一条：/controller/cmd_vel 完全无限幅且被 5~6 个 app 争用（#19 / #10）
+    output_topic: /cmd_vel
+
+    # ⚠️ 默认干跑：不向 output_topic 发任何东西，车不会动。
+    #    本机没有物理急停（#22），所以"能真动"必须显式打开，且必须在有人看护的时段。
+    dry_run: true
+    dry_run_topic: /embodied/motor/cmd_vel_dryrun
+
+    status_topic: /embodied/motor/status
+
+    # 存活判据**只认这两个**（D-021）：
+    # 断线时 /odom 照发 28.5 Hz、桥进程也照活，只有 imu_raw / battery 会停。
+    imu_topic: /ros_robot_controller/imu_raw
+    battery_topic: /ros_robot_controller/battery
+
+    # 持续发布频率。**空闲时也发**（发零）—— 底盘无指令超时保护，停止发布 ≠ 停车（D-020）
+    publish_rate: 20.0
+
+    # 限幅：与厂商 /cmd_vel 的实测钳制一致（PROJECT_STATUS §7），再钳一次属纵深防御
+    max_vx: 0.2
+    max_vy: 0.2
+    max_wz: 0.5
+
+    # 上层停发指令多久后自动归零（秒）。上层按 20 Hz 发的话，0.5 s = 漏 10 帧才判定
+    cmd_timeout: 0.5
+    # 底盘遥测多久没来即判定失联（秒）。
+    # ⚠️ 必须比**最慢的**那路遥测周期大不少。实测：imu_raw 46.9 Hz、battery **0.95 Hz（周期 1.05 s）**。
+    #    取 2.5 s 给 battery 留了 2 倍余量；若按 imu 的周期（21 ms）去定，
+    #    imu 单独失效时会跟着 battery 的节拍在阈值上下反复抖动。
+    telemetry_timeout: 2.5

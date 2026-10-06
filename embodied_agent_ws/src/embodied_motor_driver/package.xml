@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_motor_driver</name>
+  <version>0.1.0</version>
+  <description>
+    JetsonRobot Overlay 电机/底盘 Driver（架构分层中的 Driver 层）。
+    把厂商底盘收口成本项目唯一的一个执行器入口，并在这里封住四条硬约束：
+      1) 主动持续发 0（底盘无指令超时保护，停止发布 != 停车；D-020 / #18）；
+      2) 存活判据只用 imu_raw / battery（断线时 /odom 照发、进程照活；D-021 / #21）；
+      3) 发布前再限幅一次（纵深防御，/controller/cmd_vel 那条完全没有钳制；#19）；
+      4) 锁存停车（/stop 之后必须显式 /resume）。
+    ⚠️ 默认 dry_run=true，不会驱动底盘。本节点不含任何语义/规划，LLM 不得介入。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

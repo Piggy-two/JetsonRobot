@@ -153,7 +153,7 @@ ros2 action list
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **Phase 0** | 环境与硬件启动验收（底盘 / LiDAR / 相机 / 麦克风 / 扬声器 + 接口清单） | 🚧 **进行中**（LiDAR ✅ / 底盘运动 ✅ / 通信中断 ✅ / **相机 ✅ 已完全收口** / **语音音频硬件 ✅**；⚠️ **语音唤醒实测不通**、急停链路用户已暂缓） |
-| **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅**（`embodied_camera_driver`，D-023）；Motor / LiDAR Driver 未开始 |
+| **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅ 无遗留**（`embodied_camera_driver`，D-023）；**电机 Driver ✅ 已落地、干跑验证通过**（`embodied_motor_driver`，**D-025**，**默认 `dry_run=true` 不驱动底盘**；真机运动测试待人工看护时做）；LiDAR Driver 未开始（厂商 `/scan` 数据正确，无待收口项） |
 | Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | ⬜ 未开始 |
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
 | Phase 4 | Semantic Skills（`search_object` / `inspect_area` / `patrol_route` / `return_home`） | ⬜ 未开始 |
@@ -161,7 +161,7 @@ ros2 action list
 | Phase 6 | Agent Runtime（Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway） | ⬜ 未开始 |
 | Phase 7 | Hybrid LLM（Rule Engine + Cloud LLM + 预留 Local Small LLM） | ⬜ 未开始 |
 
-> **仓库现状**：包含设计方案（`docs/plan.md`）、Phase 0 验收工装（`tools/`）、以及 **Overlay 业务代码工作区 `embodied_agent_ws/`**（首个节点为相机 Driver `embodied_camera_driver`，2026-10-05 落地，**D-023**）。后续业务代码按上表顺序在该工作区内引入。
+> **仓库现状**：包含设计方案（`docs/plan.md`）、Phase 0 验收工装（`tools/`）、以及 **Overlay 业务代码工作区 `embodied_agent_ws/`**（首个节点为相机 Driver `embodied_camera_driver`，2026-10-05 落地，**D-023**；第二个是电机 Driver `embodied_motor_driver`，2026-10-06 落地，**D-025**）。后续业务代码按上表顺序在该工作区内引入。
 
 **第一版明确不做**：机械臂、多机器人、强化学习导航、复杂 RAG、大型本地 VLM、自动充电。
 
