@@ -1,0 +1,9 @@
+# 原地旋转 angle 弧度。**逆时针为正**（REP-103，绕 +z）。
+#
+# 为什么单独一个服务而不是塞进 MoveRelative：旋转与平移的**时间尺度、闭环方式、
+# 失败模式都不同**（旋转会累积朝向误差，平移不会）。分开也便于后续给旋转单独加里程计闭环。
+float64 angle
+---
+bool success
+string message
+float64 elapsed     # 实际耗时（秒）

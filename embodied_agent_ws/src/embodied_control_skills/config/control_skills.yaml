@@ -1,0 +1,30 @@
+control_skills:
+  ros__parameters:
+    # 输出到 Motor Driver 的执行器入口（D-025）。**不是** /cmd_vel ——
+    # 谁都不该绕过 Motor Driver 直接下令（限幅、持续发零、存活判据都在那一层）。
+    output_topic: /embodied/motor/cmd_vel
+    # 用来做"底盘是否确认在线"的前置条件
+    status_topic: /embodied/motor/status
+
+    publish_rate: 20.0
+
+    # 标称速度**低于**底盘限幅（±0.2 m/s / ±0.5 rad/s），留余量别顶着上限跑
+    nominal_speed: 0.15          # m/s
+    nominal_rate: 0.40           # rad/s
+
+    # ⚠️ 本项目自己的护栏：单次位移 / 转角上限。
+    #    这与"速度限幅"是**两件事** —— Motor Driver 管的是"多快"，管不了"走多远"。
+    max_distance: 1.0            # m
+    max_angle: 3.141592653589793 # rad（180°）
+
+    # 与 Motor Driver / 厂商一致，**仅用于断言**：
+    # 若规划出的速度超限就拒绝运动，而不是让它被静默钳掉
+    #（被钳掉 = 实际位移与时长都对不上，调用方却拿到 success）
+    max_vx: 0.2
+    max_vy: 0.2
+    max_wz: 0.5
+
+    # Motor Driver 的状态多久没更新即视为"底盘未知"，拒绝运动
+    chassis_status_timeout: 1.0
+    # 等待运动收尾的额外宽限（控制循环异常时用于暴露故障，而不是假报成功）
+    finish_slack: 0.5

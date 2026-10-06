@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_skills_interfaces</name>
+  <version>0.1.0</version>
+  <description>
+    JetsonRobot 项目自己的 Skill 接口定义（Control Skill 层起）。
+    用项目自己的 .srv 而不是拿 std_msgs/geometry_msgs 硬凑：
+    指令的**语义**（米 / 弧度、坐标系、正方向）必须写在接口里，否则下游只能靠约定俗成。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -51,6 +51,7 @@
 | **相机与语音盒硬件验收** | ① **相机**：用 `v4l2` 的 `brightness`（ISP 数字偏移、逐帧立即生效）当"传感器端打光"探针，实测**内容端到端延迟仅约一帧**（`image_compressed` 19~44 ms；`image_raw` 多出的约 90 ms 是订阅端解析 614 KB 的开销）—— 硬件确认可用；同时坐实 **`header.stamp` 比真实采集时刻早 0.72 s**（内容新鲜、时间戳陈旧），并逐条排除订阅积压 / 仿真时钟 / 冻结换算基准 / 双发布者 / USB 带宽 / 设备档位六种解释（机制未定，`usb_cam` 本机无源码）；确认 22.6 Hz 是**主机侧丢帧**。② **语音盒**：控制串口 `/dev/ttyCH341USB1` 可用；card 0 **录音 + 播放均通过**（用户确认听到 440 Hz 提示音）；`/dev/ring_mic` 根因是**过期 udev 路径**（规则写 `1-2.3.1`，实际 `1-2.4.1`），**已修正**并验证厂商 ASR 栈正常启动。决策 **D-022** | 2026-10-05 |
 | **Phase 1 第二个 Driver：`embodied_motor_driver`（Motor Driver）** | 把**四条安全硬约束封进代码**（D-020 主动持续发零 / D-021 存活判据只用 `imu_raw`+`battery` / #19 自己再限幅 / #22 锁存停车），上层不必各自记得。判断逻辑抽到纯 Python 的 `safety_gate.py`，**14 项离线单测全过**。**默认 `dry_run=true`：不向 `/cmd_vel` 发布任何东西**（本机无物理急停，"能真动"必须显式打开）。干跑实测：`/cmd_vel` 发布者数 **0**、干跑话题 **19.998 Hz** 持续发零、超限指令被钳到 `(+0.2, -0.2, +0.5)`、停发指令 0.5 s 归零、`~/stop` 锁存 / `~/resume` 解除、启动时未收到遥测即判 `telemetry_lost`。决策 **D-025** | 2026-10-06 |
 | **Motor Driver 的链路失联处理（D-021 的安全窗口）** | 补上 D-021 明确要求"本项目自己实现"的那一段。**权限边界先说清**：真恢复要 `sudo systemctl restart start_app_node.service`，**Driver 做不到**（需 root），所以本轮实现的是**策略侧**：失联即持续发零并发事件；**若失联那刻底盘"可能还在动"，恢复后置位「需重新使能」——即使上层继续发指令也一律输出零**，直到显式 `~/resume`；启动阶段不算失联（避免每次开机假警报）。**用假遥测制造失联验证（零硬件风险）**：6.0 s 切断遥测 → **8.5 s 检出（恰好 +2.5 s 超时）**、12.0 s 恢复并置位 `rearm_required`、**12~18 s 上层全程发 0.2 m/s 而输出始终为 0**、18.0 s `~/resume` 后才恢复 0.2。单测 14 → **21 项**。决策 **D-025 决策 6** | 2026-10-06 |
+| **Phase 2 首个 Control Skill 落地（`embodied_control_skills` + 接口包）** | 把 Motor Driver 的"速度"包成**确定性动作原语**：`~/move_relative`（机体坐标系平移，x 前/y 左）、`~/rotate`（逆时针为正）、`~/stop`（立即中止）。**同时回答了 D-011 里"跨语言 IPC 具体形式待定"**（**D-026**：用 service 而非 action，理由与升级路径见该决策）。第一版**开环**——`success` 的含义是"速度按时长发完了"，**不是"真的走到位了"**。一次只跑一个动作（运动中再来请求直接拒绝、**不排队**）。**干跑验证 16/16 项通过**：∫vx **0.495** vs 请求 0.500 m、∫wz **1.560** vs 1.5708 rad、斜向 0.297/0.396、超上限请求被拒且**积分 0**、运动中 `~/stop` **0.35 s 内把 1 m 的请求停在 0.045 m**、Motor Driver 不在跑时**拒绝运动**。单测 19 项 | 2026-10-06 |
 
 ---
 
@@ -58,6 +59,9 @@
 
 - **Overlay Workspace 已建立，并落地第一个业务代码节点。** `embodied_agent_ws/` 建在**仓库内**，内含 `embodied_camera_driver`（Driver 层，D-023）：在同一个节点内收口 #23（重新打时间戳）与 #16（补发 TF `camera_link0 → camera`）。已编译、已实跑、已实测验证（详见 §7 与 DEVELOPMENT_LOG 第四轮）。**项目由此进入「有业务代码」阶段。**
 - **Phase 1 已落地第二个 Driver：`embodied_motor_driver`（D-025）**，把**四条安全硬约束封进代码**（主动持续发零 / 存活判据只用 `imu_raw`+`battery` / 自己再限幅 / 锁存停车），判断逻辑抽成纯 Python 的 `safety_gate.py`（**14 项离线单测**）。**默认 `dry_run=true`，不向 `/cmd_vel` 发布任何东西**（本机无物理急停）。干跑实测通过；**真机运动未测**，需人工看护。
+- **Phase 2 已落地首个 Control Skill：`embodied_control_skills`**（**D-026**）—— `~/move_relative` / `~/rotate` / `~/stop`，
+  接口用项目自己的 `.srv`（`embodied_skills_interfaces`）。**干跑验证 16/16 通过**（把发出的速度序列积分来量位移）。
+  ⚠️ **第一版是开环**：`success` 只表示"速度按时长发完了"，**不表示真的走到位**；闭环需要反馈，尚未做。
 - **硬件侧只剩一项**：**底盘安全侧 —— 急停链路**（需物理操作；**用户已明确暂缓**；遥控优先级用户已降级）。
 - **⚠️ 仍待继承的欠账**：① ~~TF 朝向需实机目视校验一次~~ ✅ **2026-10-06 已通过**（#16 完全闭合，见 §7）；② `/dev/video0` 无稳定符号链接（#17，须在 Overlay 自建 udev 规则）；③ ~~时间戳修正量 `pipeline_latency` 待校准~~ ✅ **2026-10-06 已标定为 110 ms**（但它**随负载变化**，不是常数，换负载后需重标，见 #23 / DEV_NOTES §4）；④ 语音**软件侧**未验收，且**第七轮实测发现唤醒不通**（**#25**，需停厂商 ASR 三节点手动重启才能继续定位，**需人在场/批准**）；⑤ **`voice_control_move` 目前处于停用状态**（第七轮为防止误识别成运动指令而手动停掉，尚未恢复；恢复方式：`sudo systemctl restart start_app_node.service`）。
 - **下一步的第一件事**：见 §6 —— 定 **Phase 1（Driver / Primitive）的接入面**，或者先做**语音软件侧验收**。
@@ -111,6 +115,9 @@
    - ✅ **2026-10-06：Phase 1 第二个 Driver `embodied_motor_driver` 已落地**（**D-025**，干跑验证通过、14 项离线单测全过）。**它的下一步**：
      - 🔴 **真机运动测试** —— **需人工看护 + 人必须能直接断电**（本机无物理急停），且必须显式 `dry_run:=false`；同时顺带做 `odom_publisher` 往返验证。
      - ⬜ 真机测试时确认：`~/stop` 锁存的停车**在底盘侧确实生效**（厂商侧无超时保护，这条只能实测）。
+     - ⬜ **Control Skill 的闭环**：现在开环，`success` 不代表走到位。闭环需要反馈来源，
+       而**反馈源本身要先决策** —— `/odom` **不能**当存活判据（D-021），但作为"走了多远"的
+       参考是否够用，需要实测比对（真机运动时一并做）。LiDAR / 视觉是另一条路。
      - ✅ ~~**断线自恢复**~~ 部分完成（2026-10-06）：**策略侧已落地并验证**（失联→持续发零→恢复后需显式重新使能，见 D-025 决策 6）。**但"真恢复"仍须人工** —— 重启厂商服务要 root；若要自动化，需要一个**有权限的辅助程序**（如只允许重启那一个服务的 polkit 规则），属**系统级改动，须用户单独决策**。
 2. **底盘安全侧验收**（**Phase 0 剩下的硬骨头**，需物理操作 + 人工看护）：
    - ~~通信中断停车~~ ✅ **2026-10-05 已完成**（S2 冻结 + S3 真断线；结论见 #18 / #21 / **D-020 / D-021**）。**注**：「运动中拔线」这一更极端场景**刻意未做**（按构造不安全，理由见 D-020）。
@@ -144,6 +151,7 @@
 | 相机 | 单目 UVC（内核 `uvcvideo`）+ 厂商 `usb_cam` 分支 | 厂商 `peripherals/launch/depth_camera.launch.py`（`DEPTH_CAMERA_TYPE=usb_cam` → `usb_cam_node_exe`，见 D-019） | ✅ `/dev/video0`（YUYV 640×480；设备协商 30 fps 但**主机侧实际约 22.6 Hz 且随负载变化**，#15） | ✅ `/depth_cam/rgb0/image_raw`（**1 个发布者**，`encoding=yuv422_yuy2`，唯一订阅者 `/yolo`）+ `/depth_cam/rgb0/camera_info`；**端到端延迟 ≈ 一帧（20~45 ms）** | 设备 `/dev/video0`（**无稳定符号链接**，#17）；图像 `frame_id=camera` → **Driver 已补 TF `camera_link0 → camera`**（D-023） | ✅ **硬件通过 + Driver 已收口且朝向已校验**（2026-10-05 ~ 10-06，D-022 / D-023） |
 | **相机 Driver**（Overlay） | ✅ `embodied_camera_driver`（本项目 Driver 层，D-023） | `ros2 launch embodied_camera_driver camera_driver.launch.py`（**须在 bash 中**先 source 厂商再 source 本 Overlay） | ✅ `/depth_cam/rgb0/image_raw`（订阅 BEST_EFFORT / depth=1，只取最新帧） | ✅ **`/embodied/camera/image`**（帧号已重打，`frame_id=camera`，**实测 20.9 Hz ≈ 1:1 透传**）+ **`/embodied/camera/diag`**（`Float64MultiArray` = `[帧数, 帧率Hz, 原始戳陈旧量ms, 施加修正量ms, 最大陈旧量ms]`） | ✅ **TF `camera_link0 → camera`**（静态，REP-103 光学 rpy `(-π/2, 0, -π/2)`）；实测 `base_footprint → base_link → camera_link0 → camera` **端到端可解析** | ✅ **已通过且无遗留**（2026-10-05，D-023）；2026-10-06：`pipeline_latency` **标定为 110 ms**（残差 ≈ −9 ms）+ **TF 朝向实机校验通过**（无镜像/无滚转，参数无需修正，见 §7） |
 | **电机 Driver**（Overlay） | ✅ `embodied_motor_driver`（本项目 Driver 层，D-025） | `ros2 launch embodied_motor_driver motor_driver.launch.py`（**默认 `dry_run:=true`，车不会动**；要真动须显式 `dry_run:=false` 且有人看护） | ✅ `/embodied/motor/cmd_vel`（`geometry_msgs/Twist`，本项目的执行器入口） | ✅ `/cmd_vel`（**厂商侧唯一令入点**；dry-run 时改为 `/embodied/motor/cmd_vel_dryrun`）+ `/embodied/motor/status`（`Float64MultiArray` = `[状态码, vx, vy, wz, 指令龄ms, imu龄ms, battery龄ms, 锁存, dry_run, 需重新使能]`，状态码 0=ok 1=no_cmd 2=telemetry_lost 3=stopped **4=rearm_required**）+ `/embodied/motor/events`（`String`，**只在变化时发**：`chassis_link_lost` / `chassis_link_recovered` / `rearm_required` / `rearmed`）+ 服务 `~/stop` / `~/resume`（`std_srvs/Trigger`） | 无 TF 职责 | 🟡 **干跑 + 失联/恢复验证通过**（2026-10-06，**21 项单测** + 假遥测制造链路失联）；⚠️ **真机运动未测**（需人工看护 + 能直接断电） |
+| **Control Skill**（Overlay） | ✅ `embodied_control_skills` + `embodied_skills_interfaces`（Control Skill 层，**D-026**） | `ros2 launch embodied_control_skills control_skills.launch.py`（**前置：Motor Driver 必须已在跑**，否则一律拒绝运动） | ✅ 服务 `~/move_relative`（`embodied_skills_interfaces/MoveRelative`：**机体坐标系** x 前 / y 左，单位米）、`~/rotate`（`Rotate`：弧度，**逆时针为正**）、`~/stop`（`std_srvs/Trigger`，**立即中止、不等待**） | ✅ `/embodied/motor/cmd_vel`（→ Motor Driver）。**空闲时不发** —— 持续发零是 Motor Driver 的职责（D-025） | 无 TF 职责 | 🟡 **干跑验证 16/16 项通过**（2026-10-06，**19 项单测** + 速度积分实测）；⚠️ **真机运动未测**；⚠️ **开环**：`success` ≠ 走到位 |
 | 语音 | ✅ `xf_mic_asr_offline`（`awake_node.py` / `asr_node.py` / `voice_control`，修正 udev 后实测可正常启动） | `ros2 launch xf_mic_asr_offline mic_init.launch.py`（`MIC_TYPE=xf` 设在 `~/.zshrc`） | `/dev/ring_mic` → `ttyCH341USB1`（Hub 口 `1-2.4.1`，控制串口）+ 声卡 0（`1-2.4.2`，48 kHz S16_LE 2ch 采集） | ASR 文本 / 唤醒事件（**唤醒实测不通**，见 #25）；播放已实测 | `MIC_TYPE=xf`；`ASR_MODE=online`（⚠️ **该变量只被厂商 `large_models` 读取，麦克风栈不读它** —— 见 **#27**，故**不再是"断网不可用"的理由**） | ⚠️ **音频硬件通过，但链路不可用**（2026-10-05 D-022 三项硬件 + 2026-10-06 第七轮实测唤醒不通 #25） |
 | 导航 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ 未测 |
 
@@ -334,6 +342,23 @@ USB3 侧（bus 2）的 4 口 Hub 上无任何设备
 | **12.0–18.0 s** | **上层一直在发 0.2 m/s，输出始终为 0** | ✅ **核心：不静默复动** |
 | **18.0 s** | 调 `~/resume` → **+0.200**，事件 `rearmed` | ✅ 显式确认后才恢复 |
 
+**实测 Control Skill（2026-10-06 · D-026，干跑，车未动）**
+
+方法：Skill 只发速度，Motor Driver 在 dry-run 下把速度原样发到干跑话题，
+于是**把速度序列对时间积分**就得到"实际被命令走过"的位移/转角 —— **车不动，位移却是可量的**。
+
+| 用例 | 期望 | 实测 |
+|---|---|---|
+| `move_relative(0.5, 0)`（前进 0.5 m） | ∫vx ≈ 0.500 m | **+0.495 m**（误差 −0.005）；侧向 ∫vy=0.0000、∫wz=0.0000 |
+| `rotate(π/2)`（左转 90°） | ∫wz ≈ 1.5708 rad | **+1.560 rad**（误差 −0.011） |
+| `move_relative(0.3, 0.4)`（斜向） | ∫ ≈ (0.300, 0.400) | **+0.297 / +0.396** |
+| `move_relative(2.0, 0)` **超上限** | 拒绝 | ✅ 返回失败，且**积分 0.0000**（确实没发出任何速度） |
+| 运动中再来一个请求 | 拒绝（**不排队**） | ✅ `正有一个动作在执行，拒绝新请求` |
+| 运动中调 `~/stop` | 立即中止 | ✅ 只走了 **+0.045 m**（0.35 s 内把 1 m 的请求停住）；被中止的请求返回失败 |
+| **Motor Driver 不在跑** | 拒绝运动 | ✅ `Motor Driver 状态已陈旧 14.8s —— 拒绝运动` |
+
+单测 `motion_plan` **19 项全过**（钉住"恒定速度 × 时长 == 请求位移"这条积分性质）。
+
 **实测语音盒（2026-10-05 第三轮 · D-022）**
 
 | 项 | 实测值 |
@@ -387,7 +412,7 @@ voice_control_move ──→ /controller/cmd_vel（⚠️ 无限幅那条，见 
 |---|---|---|
 | **Phase 0** | 环境与硬件启动验收 + 接口清单 | 🚧 **进行中**（**相机已完全收口**；**语音实测唤醒不通，链路不可用**（#25）；急停链路用户已明确暂缓） |
 | **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅ 已落地且无遗留**（`embodied_camera_driver`，D-023）；**电机 Driver ✅ 已落地，干跑验证通过、真机未测**（`embodied_motor_driver`，D-025）；LiDAR Driver 未开始（厂商 `/scan` 目前数据正确、无待收口项，优先级低） |
-| Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | ⬜ 未开始 |
+| Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | 🚧 **已开始** —— **D-026**：`embodied_control_skills` 落地 `move_relative` / `rotate` / `stop`（**Service 接口 + 项目自己的 `.srv`**），**干跑验证 16/16 通过**。⚠️ **第一版是开环**（`success` = "速度按时长发完了"，**不是走到位**）、**真机运动未测**；`move_forward` 是 `move_relative(x=d, y=0)` 的特例，未单列 |
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
 | Phase 4 | Semantic Skills（`search_object` / `inspect_area` / `patrol_route` / `return_home`） | ⬜ 未开始 |
 | Phase 5 | Voice System（Wake Word / VAD / ASR / TTS） | ⬜ 未开始 |
