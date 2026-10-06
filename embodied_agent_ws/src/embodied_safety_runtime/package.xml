@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_safety_runtime</name>
+  <version>0.1.0</version>
+  <description>
+    JetsonRobot Overlay Safety Runtime（第一版）。
+    项目的核心主张是 Safety > Control > Skill > Agent、Safety 具有最终否决权；
+    本节点是这条主张的第一个落点。本版实现：
+      1) 本地安全指令通路（D-006 / D-024 决策 3）：订阅厂商离线 ASR 的文本，
+         在本节点内本地匹配安全词，全程不经过 LLM、不经过厂商 voice_control_* 节点；
+      2) 独立的零速通道（D-025 的反面）：锁存期间自己直接向 /cmd_vel 持续发零，
+         不依赖 Motor Driver 存活 —— 因为"持续发零"目前只在 Motor Driver 里，
+         它自己挂了就没人发零了（而底盘没有指令超时保护，D-020）。
+    本节点唯一的发布语句是 publish(Twist())，结构上不可能发出非零速度。
+    本版不含避障 / 限速 / 对下游存活的监视。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

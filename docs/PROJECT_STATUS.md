@@ -52,6 +52,7 @@
 | **Phase 1 第二个 Driver：`embodied_motor_driver`（Motor Driver）** | 把**四条安全硬约束封进代码**（D-020 主动持续发零 / D-021 存活判据只用 `imu_raw`+`battery` / #19 自己再限幅 / #22 锁存停车），上层不必各自记得。判断逻辑抽到纯 Python 的 `safety_gate.py`，**14 项离线单测全过**。**默认 `dry_run=true`：不向 `/cmd_vel` 发布任何东西**（本机无物理急停，"能真动"必须显式打开）。干跑实测：`/cmd_vel` 发布者数 **0**、干跑话题 **19.998 Hz** 持续发零、超限指令被钳到 `(+0.2, -0.2, +0.5)`、停发指令 0.5 s 归零、`~/stop` 锁存 / `~/resume` 解除、启动时未收到遥测即判 `telemetry_lost`。决策 **D-025** | 2026-10-06 |
 | **Motor Driver 的链路失联处理（D-021 的安全窗口）** | 补上 D-021 明确要求"本项目自己实现"的那一段。**权限边界先说清**：真恢复要 `sudo systemctl restart start_app_node.service`，**Driver 做不到**（需 root），所以本轮实现的是**策略侧**：失联即持续发零并发事件；**若失联那刻底盘"可能还在动"，恢复后置位「需重新使能」——即使上层继续发指令也一律输出零**，直到显式 `~/resume`；启动阶段不算失联（避免每次开机假警报）。**用假遥测制造失联验证（零硬件风险）**：6.0 s 切断遥测 → **8.5 s 检出（恰好 +2.5 s 超时）**、12.0 s 恢复并置位 `rearm_required`、**12~18 s 上层全程发 0.2 m/s 而输出始终为 0**、18.0 s `~/resume` 后才恢复 0.2。单测 14 → **21 项**。决策 **D-025 决策 6** | 2026-10-06 |
 | **Phase 2 首个 Control Skill 落地（`embodied_control_skills` + 接口包）** | 把 Motor Driver 的"速度"包成**确定性动作原语**：`~/move_relative`（机体坐标系平移，x 前/y 左）、`~/rotate`（逆时针为正）、`~/stop`（立即中止）。**同时回答了 D-011 里"跨语言 IPC 具体形式待定"**（**D-026**：用 service 而非 action，理由与升级路径见该决策）。第一版**开环**——`success` 的含义是"速度按时长发完了"，**不是"真的走到位了"**。一次只跑一个动作（运动中再来请求直接拒绝、**不排队**）。**干跑验证 16/16 项通过**：∫vx **0.495** vs 请求 0.500 m、∫wz **1.560** vs 1.5708 rad、斜向 0.297/0.396、超上限请求被拒且**积分 0**、运动中 `~/stop` **0.35 s 内把 1 m 的请求停在 0.045 m**、Motor Driver 不在跑时**拒绝运动**。单测 19 项 | 2026-10-06 |
+| **Safety Runtime 第一版（`embodied_safety_runtime`）** | 项目主张是 `Safety > Control > Skill > Agent`，但此前"停"是**散着**的（Motor Driver 有锁存、Control Skill 有 `~/stop`），**没有"最终否决权"的落点**。本版落地两件事：① **本地安全指令通路**（D-006 / D-024 决策 3）—— 订阅厂商**离线** ASR 的文本，**在本节点内**匹配安全词，**一个字都不经过 LLM，也不经过厂商 `voice_control_*` 节点**（那条路正是 #26 里"碰巧成立"的实现）；② **独立零速通道** —— 锁存期间自己直接向 `/cmd_vel` @10 Hz 发零，**不依赖 Motor Driver 存活**（因为"持续发零"目前只在它里面，它挂了就没人发零，而底盘无指令超时保护 D-020）。🔒 **本节点唯一的发布语句是 `publish(Twist())`，结构上不可能发出非零速度**。急停**锁存**，必须显式 `~/release`。**实测 14/14 通过，且全程 Motor Driver 未启动**。决策 **D-027** | 2026-10-06 |
 
 ---
 
@@ -62,6 +63,10 @@
 - **Phase 2 已落地首个 Control Skill：`embodied_control_skills`**（**D-026**）—— `~/move_relative` / `~/rotate` / `~/stop`，
   接口用项目自己的 `.srv`（`embodied_skills_interfaces`）。**干跑验证 16/16 通过**（把发出的速度序列积分来量位移）。
   ⚠️ **第一版是开环**：`success` 只表示"速度按时长发完了"，**不表示真的走到位**；闭环需要反馈，尚未做。
+- **Safety Runtime 第一版已落地**（**D-027**）—— 项目的 `Safety > Control > Skill > Agent` 主张
+  第一次有了**落点**：本地安全指令通路（不经 LLM、不经厂商节点）+ **独立零速通道**
+  （不依赖 Motor Driver 存活）。⚠️ 按 plan.md 属 Phase 6，**提前开始**，因为 #22「本机没有物理急停」
+  这条约束今天就压着。**本版不含**避障 / 限速 / 对下游存活的监视。
 - **硬件侧只剩一项**：**底盘安全侧 —— 急停链路**（需物理操作；**用户已明确暂缓**；遥控优先级用户已降级）。
 - **⚠️ 仍待继承的欠账**：① ~~TF 朝向需实机目视校验一次~~ ✅ **2026-10-06 已通过**（#16 完全闭合，见 §7）；② `/dev/video0` 无稳定符号链接（#17，须在 Overlay 自建 udev 规则）；③ ~~时间戳修正量 `pipeline_latency` 待校准~~ ✅ **2026-10-06 已标定为 110 ms**（但它**随负载变化**，不是常数，换负载后需重标，见 #23 / DEV_NOTES §4）；④ 语音**软件侧**未验收，且**第七轮实测发现唤醒不通**（**#25**，需停厂商 ASR 三节点手动重启才能继续定位，**需人在场/批准**）；⑤ **`voice_control_move` 目前处于停用状态**（第七轮为防止误识别成运动指令而手动停掉，尚未恢复；恢复方式：`sudo systemctl restart start_app_node.service`）。
 - **下一步的第一件事**：见 §6 —— 定 **Phase 1（Driver / Primitive）的接入面**，或者先做**语音软件侧验收**。
@@ -152,6 +157,7 @@
 | **相机 Driver**（Overlay） | ✅ `embodied_camera_driver`（本项目 Driver 层，D-023） | `ros2 launch embodied_camera_driver camera_driver.launch.py`（**须在 bash 中**先 source 厂商再 source 本 Overlay） | ✅ `/depth_cam/rgb0/image_raw`（订阅 BEST_EFFORT / depth=1，只取最新帧） | ✅ **`/embodied/camera/image`**（帧号已重打，`frame_id=camera`，**实测 20.9 Hz ≈ 1:1 透传**）+ **`/embodied/camera/diag`**（`Float64MultiArray` = `[帧数, 帧率Hz, 原始戳陈旧量ms, 施加修正量ms, 最大陈旧量ms]`） | ✅ **TF `camera_link0 → camera`**（静态，REP-103 光学 rpy `(-π/2, 0, -π/2)`）；实测 `base_footprint → base_link → camera_link0 → camera` **端到端可解析** | ✅ **已通过且无遗留**（2026-10-05，D-023）；2026-10-06：`pipeline_latency` **标定为 110 ms**（残差 ≈ −9 ms）+ **TF 朝向实机校验通过**（无镜像/无滚转，参数无需修正，见 §7） |
 | **电机 Driver**（Overlay） | ✅ `embodied_motor_driver`（本项目 Driver 层，D-025） | `ros2 launch embodied_motor_driver motor_driver.launch.py`（**默认 `dry_run:=true`，车不会动**；要真动须显式 `dry_run:=false` 且有人看护） | ✅ `/embodied/motor/cmd_vel`（`geometry_msgs/Twist`，本项目的执行器入口） | ✅ `/cmd_vel`（**厂商侧唯一令入点**；dry-run 时改为 `/embodied/motor/cmd_vel_dryrun`）+ `/embodied/motor/status`（`Float64MultiArray` = `[状态码, vx, vy, wz, 指令龄ms, imu龄ms, battery龄ms, 锁存, dry_run, 需重新使能]`，状态码 0=ok 1=no_cmd 2=telemetry_lost 3=stopped **4=rearm_required**）+ `/embodied/motor/events`（`String`，**只在变化时发**：`chassis_link_lost` / `chassis_link_recovered` / `rearm_required` / `rearmed`）+ 服务 `~/stop` / `~/resume`（`std_srvs/Trigger`） | 无 TF 职责 | 🟡 **干跑 + 失联/恢复验证通过**（2026-10-06，**21 项单测** + 假遥测制造链路失联）；⚠️ **真机运动未测**（需人工看护 + 能直接断电） |
 | **Control Skill**（Overlay） | ✅ `embodied_control_skills` + `embodied_skills_interfaces`（Control Skill 层，**D-026**） | `ros2 launch embodied_control_skills control_skills.launch.py`（**前置：Motor Driver 必须已在跑**，否则一律拒绝运动） | ✅ 服务 `~/move_relative`（`embodied_skills_interfaces/MoveRelative`：**机体坐标系** x 前 / y 左，单位米）、`~/rotate`（`Rotate`：弧度，**逆时针为正**）、`~/stop`（`std_srvs/Trigger`，**立即中止、不等待**） | ✅ `/embodied/motor/cmd_vel`（→ Motor Driver）。**空闲时不发** —— 持续发零是 Motor Driver 的职责（D-025） | 无 TF 职责 | 🟡 **干跑验证 16/16 项通过**（2026-10-06，**19 项单测** + 速度积分实测）；⚠️ **真机运动未测**；⚠️ **开环**：`success` ≠ 走到位 |
+| **Safety Runtime**（Overlay） | ✅ `embodied_safety_runtime`（**D-027**，按 plan.md 属 Phase 6，**提前开始**） | `ros2 launch embodied_safety_runtime safety_runtime.launch.py` | ✅ `/asr_node/voice_words`（**厂商离线 ASR 的文本**；本地匹配安全词） | 🔒 `/cmd_vel`（**独立零速通道**，锁存期间 @10 Hz 发零；**唯一的发布语句就是 `publish(Twist())`，只会发零**）+ `/embodied/safety/status`（`Float64MultiArray` = `[是否锁存, 已发零帧数, 触发次数]`）+ `/embodied/safety/events`（`String`：`estop_triggered:<原因>` / `estop_released`）+ 服务 `~/estop` / `~/release`（`std_srvs/Trigger`，**锁存，必须显式解除**） | 无 TF 职责 | 🟢 **离线 + 实测 14/14 通过**（2026-10-06，**37 项单测**；**全程 Motor Driver 未启动**，证明零速通道独立）；⚠️ **本版不含**避障 / 限速 / 对下游存活的监视 |
 | 语音 | ✅ `xf_mic_asr_offline`（`awake_node.py` / `asr_node.py` / `voice_control`，修正 udev 后实测可正常启动） | `ros2 launch xf_mic_asr_offline mic_init.launch.py`（`MIC_TYPE=xf` 设在 `~/.zshrc`） | `/dev/ring_mic` → `ttyCH341USB1`（Hub 口 `1-2.4.1`，控制串口）+ 声卡 0（`1-2.4.2`，48 kHz S16_LE 2ch 采集） | ASR 文本 / 唤醒事件（**唤醒实测不通**，见 #25）；播放已实测 | `MIC_TYPE=xf`；`ASR_MODE=online`（⚠️ **该变量只被厂商 `large_models` 读取，麦克风栈不读它** —— 见 **#27**，故**不再是"断网不可用"的理由**） | ⚠️ **音频硬件通过，但链路不可用**（2026-10-05 D-022 三项硬件 + 2026-10-06 第七轮实测唤醒不通 #25） |
 | 导航 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ 未测 |
 
@@ -359,6 +365,19 @@ USB3 侧（bus 2）的 4 口 Hub 上无任何设备
 
 单测 `motion_plan` **19 项全过**（钉住"恒定速度 × 时长 == 请求位移"这条积分性质）。
 
+**实测 Safety Runtime（2026-10-06 · D-027）—— 全程 Motor Driver 未启动**
+
+⚠️ **Motor Driver 不启动是刻意的**：要验的正是"零速通道独立于它"。
+
+| 检查 | 实测 |
+|---|---|
+| `go forward` / **`停止追踪`** / `唤醒成功(wake-up-success)` | ✅ **都不触发**，且**没向 `/cmd_vel` 发过任何东西** |
+| 本地识别到 `停下`（走真实解析路径，非直接调服务） | ✅ 立刻锁存，事件 `estop_triggered:voice:停下` |
+| 独立零速通道 | ✅ 约 **10 Hz** 持续发零；**非零帧数 = 0** |
+| 锁存期间说别的 | ✅ **不解除** |
+| `~/release` | ✅ 显式解除后才停发零；解除后 1 s 内 **0 帧** |
+| `~/estop` 服务 | ✅ 也能触发 |
+
 **实测语音盒（2026-10-05 第三轮 · D-022）**
 
 | 项 | 实测值 |
@@ -416,7 +435,7 @@ voice_control_move ──→ /controller/cmd_vel（⚠️ 无限幅那条，见 
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
 | Phase 4 | Semantic Skills（`search_object` / `inspect_area` / `patrol_route` / `return_home`） | ⬜ 未开始 |
 | Phase 5 | Voice System（Wake Word / VAD / ASR / TTS） | ⬜ 未开始 |
-| Phase 6 | Agent Runtime（Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway） | ⬜ 未开始 |
+| Phase 6 | Agent Runtime（Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway） | 🚧 **Safety 部分提前开始**（**D-027**，2026-10-06：`embodied_safety_runtime` 第一版——本地安全指令通路 + 独立零速通道）。**理由**：D-006 的要求**在当下就成立**（本机没有物理急停，#22），不必等 Agent 层建好。其余（Planner / Executor / Skill Registry / Memory）未开始 |
 | Phase 7 | Hybrid LLM（Rule Engine + Cloud LLM + 预留 Local Small LLM） | ⬜ 未开始 |
 
 ---

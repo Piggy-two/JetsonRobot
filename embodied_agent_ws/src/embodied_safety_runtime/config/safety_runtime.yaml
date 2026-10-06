@@ -1,0 +1,24 @@
+safety_runtime:
+  ros__parameters:
+    # 厂商离线 ASR 的文本输出。⚠️ 只**订阅**它 ——
+    # 识别侧复用厂商的离线链路，执行侧完全由本项目自己做（D-024 决策 3）。
+    voice_topic: /asr_node/voice_words
+
+    # ⚠️ 独立零速通道：锁存期间本节点**自己**直接向底盘发 Twist()（全零）。
+    #    为什么不用"命令 Motor Driver 停"就够了：持续发零目前只在 Motor Driver 里（D-025），
+    #    **它自己挂了就没人发零了**，而底盘没有指令超时保护（D-020）会一直保持最后速度。
+    #    所以急停通道必须独立。🔒 本节点唯一的发布语句是 publish(Twist()) —— 只会发零。
+    zero_channel_topic: /cmd_vel
+    zero_rate: 10.0
+
+    # 安全词表（整句匹配，不是子串匹配 —— 理由见 estop.py）。
+    # 默认表见 embodied_safety_runtime/estop.py 的 DEFAULT_SAFETY_PHRASES。
+    # 想加现场常用说法就在这里加，例如：
+    #   safety_phrases: ['停', '停下', '急停', 'stop', 'halt']
+
+    # best-effort：把下游的锁存也打开。⚠️ **急停不依赖它们能调通**。
+    motor_stop_service: /motor_driver/stop
+    control_stop_service: /control_skills/stop
+
+    status_topic: /embodied/safety/status
+    event_topic: /embodied/safety/events
