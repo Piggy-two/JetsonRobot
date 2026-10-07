@@ -691,6 +691,13 @@ voice_control_move ──→ /controller/cmd_vel（⚠️ 无限幅那条，见 
 | `embodied_autonomous_skills` | ✅ 19 项 | ✅ 走完 `ARRIVED`，∫vx 对得上 | ⚠️ **未验证**（悬空时它走的每一步都"通畅"，测不到 BLOCKED 分支） | **闭环**技能；③号闸门之外还多一层"它自己会去调 Control Skill" |
 | `embodied_agent_runtime` | ✅ 39 项 | ✅ 端到端唤醒链跑通 | 🟡 **间接**（架空测试未经过它） | Planner 是 stub（规则表默认空）；**没有重规划** |
 
+> ✅ **2026-10-07 第十一轮回归**：D-036/D-037 改了节点耦合之后，把
+> `tools/upper_layer_dryrun_acceptance.py` **整套重跑，23/23 全过**（命令路由 → 网关 →
+> Control Skill → Motor Driver 的干跑积分、事件契约、拒绝路径、task-tier 唤醒链）。
+> ⇒ **上表这几行的 dry-run 一列，结论在今天的改动之后仍然成立。**
+> ⚠️ 一条顺带观察：`--advance-distance` 必须与 `rules_file` 里的 `max_distance` 一致，
+> 否则那条断言没有意义。**这类干跑验收车全程不动，不需要人看护** —— 改动后随时可做回归。
+
 > ⚠️ **一句话（2026-10-07 更新）**：**"链能不能驱动底盘、停不停得住"已经在架空条件下验证过了**
 > （见下「架空实测」）；但 **"会不会真的走到那个位置"仍然没有被验证**。
 >
