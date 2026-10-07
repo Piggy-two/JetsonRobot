@@ -1472,12 +1472,20 @@ Safety 的独立零速通道**保留**，它的角色仍是 **Motor Driver 已�
   这类"只跑 Motor Driver"的工装，必须一起起 Safety（或显式 `require_safety:=false`）；
   **避障守卫（D-036）也要关掉** —— 它会拦住正在被命令前进的运动学验收。
   两处说明已写进对应工装的文档字符串；**它们此前记录的结果是在改之前得到的**。
-- 本轮只做到"消息层面 + 离线单测"的验证；**真机上这一套的物理效果仍未验证**。
+- **架空实测已做**（见下）；但**地面**（承重、摩擦、打滑）与**急停链路**（#22 硬件层）仍是空白。
 
 **实现**：`embodied_motor_driver/safety_gate.py`（纯逻辑，新增 10 项单测，合计 31 项）；
 `motor_driver.py` 接线；status 话题**追加** 3 个字段（前 10 个位置不变）；
 launch 新增 `require_safety` / `safety_status_topic` / `safety_timeout`。
-验证工装仍是 `tools/cmd_vel_arbitration_probe.py`（两档都必须 0%）。
+验证工装：`tools/cmd_vel_arbitration_probe.py`（消息层，两档都必须 0%）
++ `tools/safety_chain_suspended_acceptance.py --phase veto`（**物理层**）。
+
+✅ **2026-10-07 架空实测（四轮离地、`dry_run:=false`）：11/11 通过。**
+关键一条：把 Safety 的 `/motor_driver/stop` **故意设成不可达**，
+运动中触发 `~/estop` —— 轮速指令归零、**底盘真的停了**，
+而 **Motor Driver 自己的锁存标志 = 0**（证明停靠的是**读到的状态**，不是那次调不通的调用）。
+"不会停的客户端"场景下，只解除安全层后底盘**仍不动**（状态码 4），显式 `~/resume` 后才动。
+⚠️ 边界：验的是"停得住"，不是"走到位了"；架空时轮子不承重。
 
 ---
 
