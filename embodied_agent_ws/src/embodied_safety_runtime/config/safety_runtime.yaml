@@ -28,5 +28,30 @@ safety_runtime:
     motor_status_topic: /embodied/motor/status
     motor_watchdog: 2.0          # 秒。Motor Driver 状态正常约 20 Hz，2 s 已是 40 倍余量
 
+    # ---- 避障守卫（D-036）----
+    # 只回答一个问题："按**被命令的运动方向**，阈值之内有没有东西？"
+    # 方向与速度取自上面那条 motor_status_topic 里的 vx/vy（Motor Driver 的**输出**，
+    # 它锁存/超时时自己就是 0），所以侧移/后退各按各自方向判，不是"哪里是前方"。
+    enable_obstacle_guard: true
+
+    # ⚠️ 阈值不用固定距离，用 **速度 × obstacle_lookahead**（TTC 式）。
+    #    理由：D-028 实测近场回波占比在两次摆位间 3.6% → 67%，
+    #    **任何固定的距离阈值都会被场地否决**；而"这车需要多远刹住"是车的属性。
+    obstacle_lookahead: 1.5      # 秒。⚠️ 待实测标定（标定方法见 DEV_NOTES）
+    obstacle_min_range: 0.20     # 米。低速兜底。⚠️ 待实测标定
+    obstacle_max_range: 1.00     # 米。合理性封顶，正常速度下够不着
+    obstacle_width: 1.0471975511965976   # 弧度 = ±30°，与 LiDAR 原语的"前方扇区"同宽
+    obstacle_min_speed: 0.02     # 米/秒。低于此视为"没有在平移"，不做判定
+                                 # （否则停在墙边会被反复锁存）
+
+    # 新鲜度**不由被监视的答案自己声明**：sector_min_range 把"扫描陈旧"与
+    # "扇区真的空"返回成同一个值（valid=false, range=-1），直接信它就会把
+    # "我瞎了"读成"路是通的"（D-028 的「不知道 ≠ 安全」）。
+    # 所以另取一路心跳：LiDAR 原语每收到一帧扫描发一次 /embodied/lidar/front，只看到达时刻。
+    lidar_front_topic: /embodied/lidar/front
+    obstacle_scan_timeout: 0.5   # 秒。心跳超时（/scan 10 Hz，0.5 s 已是 5 帧余量）
+    sector_service: /lidar_driver/sector_min_range
+    obstacle_reply_timeout: 0.5  # 秒。服务回答本身的超时（节点不在/卡住也算"不知道"）
+
     status_topic: /embodied/safety/status
     event_topic: /embodied/safety/events

@@ -234,6 +234,31 @@ Safety > Control > Skill > Agent
 
 > **Safety 具有最终否决权。**
 
+**已实现的部分**（`embodied_safety_runtime`，D-027 + D-036）：
+
+| 能力 | 状态 | 数据来源 |
+|---|---|---|
+| **Emergency Stop** | ✅ 本地安全词通路（订阅 ASR 文本，**不经 LLM、不经厂商节点**）+ `~/estop` 服务 | `/asr_node/voice_words` |
+| **独立零速通道** | ✅ 锁存期间自己向 `/cmd_vel` @10 Hz 发零；**唯一发布语句是 `publish(Twist())`** | —— |
+| **Watchdog（Motor Driver 停更）** | ✅ 停更 > 2 s 自动接管发零；未恢复时拒绝 `~/release` | `/embodied/motor/status` |
+| **Obstacle Stop** | ✅ **D-036**：按"被命令的运动方向"，阈值 = `速度 × 预留时间`；雷达不新鲜时**停**（不知道 ≠ 安全）。⚠️ 只停不绕行，阈值待标定 | `~/sector_min_range` + `/embodied/lidar/front`（心跳） |
+| **Command Timeout / Motor Timeout** | ✅ 在 **Motor Driver** 里（D-025），不在本节点 | —— |
+| **Speed Limit** | ✅ 在 **Motor Driver** 里（#19 的二次限幅） | —— |
+| **Low Battery Protection** | ⬜ 未做 | —— |
+
+```text
+本地安全词 ─┐
+~/estop    ─┼─→ EStopLatch ─┬─→ /cmd_vel 零速流（独立通道）
+看门狗失联 ─┤               ├─→ 下游 ~/stop（best-effort，把它们的锁存也打开）
+避障守卫   ─┘               └─→ /embodied/safety/status + /events
+```
+
+> ⚠️ **零速流与 Motor Driver 的指令流之间没有仲裁**（见 `DEV_NOTES` 坑 23）：
+> 两者是**并列发布者**，厂商端"收到一条转一条"。真正让车停住的是**下游锁存**
+> （`/motor_driver/stop`）；零速流是 **Motor Driver 已经死了**时的后备。
+> 这也是避障停车选择**锁存**而不是"自动解除"的原因（D-036 决策 1）。
+> ⚠️ 该交互**尚未实测** —— D-027 的验收刻意在 Motor Driver 不跑时进行。
+
 > ⚠️ **实测约束（2026-10-05，D-020）**：上面这一整套 **Watchdog / Command Timeout / Motor Timeout 全部要由本项目自己实现** —— 厂商底盘**没有任何指令超时保护**：停止发布后电机会保持最后一条速度指令继续转，实测 IMU 振荡幅度 ±0.067 rad/s（对比发 0 时 ±0.0015）。
 >
 > 因此 **Motor Stop 的动作定义为「主动、持续向 `/cmd_vel` 发布零速度」**，而不是「停止发指令」；且 Safety Runtime 必须拥有**独立于 Control Skill 的发布通道**，否则上游一旦卡死，停车指令也发不出去。
