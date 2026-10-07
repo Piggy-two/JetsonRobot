@@ -179,7 +179,7 @@ ros2 action list
 | [`docs/DEV_NOTES.md`](docs/DEV_NOTES.md) | **开发思路、踩坑与解法** —— 方法论（如何给测不准的量造独立基准）与可复现的教训 |
 | [`embodied_agent_ws/`](embodied_agent_ws/) | **本项目 Overlay Workspace**（业务代码在此；`build/ install/ log/` 不进 Git） |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code 长期开发规则 |
-| [`tools/`](tools/) | Phase 0 验收工装：`phase0_chassis_motion_acceptance.py`（底盘六向运动验收）、`lidar_rotation_probe.py`（用 LiDAR 独立测原地旋转角速度，丢帧免疫）、`camera_latency_probe.py`（用 `v4l2` 控制项当"世界端探针"，分离相机**端到端延迟**与**时间戳偏移**；`--topic` 可测任意话题（含 Overlay 输出）、`--repeat` + `--jitter` 做**多事件取均值**以标定 `pipeline_latency`）、`lidar_environment_probe.py`（把 LiDAR 的距离-角度剖面量化成表 + 柱状图，用于判定近场回波是**机器人自身结构**还是**外部环境** —— 判据是"换个摆位再测一次，看回波跟不跟着车走"）。**验收用，不是运行时组件** |
+| [`tools/`](tools/) | Phase 0 验收工装：`phase0_chassis_motion_acceptance.py`（底盘六向运动验收）、`lidar_rotation_probe.py`（用 LiDAR 独立测原地旋转角速度，丢帧免疫）、`camera_latency_probe.py`（用 `v4l2` 控制项当"世界端探针"，分离相机**端到端延迟**与**时间戳偏移**；`--topic` 可测任意话题（含 Overlay 输出）、`--repeat` + `--jitter` 做**多事件取均值**以标定 `pipeline_latency`）、`lidar_environment_probe.py`（把 LiDAR 的距离-角度剖面量化成表 + 柱状图，用于判定近场回波是**机器人自身结构**还是**外部环境** —— 判据是"换个摆位再测一次，看回波跟不跟着车走"）、`mic_serial_probe.py`（探测讯飞环形麦**控制串口** `/dev/ring_mic` 是否还活着：握手应答 + 纯监听模式。厂商 `awake_node` 的握手等待**没有超时**，它一卡住外面完全看不出来，这个工装把它变成明确读数 —— ⚠️ **收到 0 字节 ≠ 波特率不对**）。**验收用，不是运行时组件** |
 
 ---
 
