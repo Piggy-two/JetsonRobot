@@ -60,6 +60,73 @@ import serial
 HANDSHAKE = bytes([0xA5, 0x01, 0x01, 0x04, 0x00, 0x00, 0x00,
                    0xA5, 0x00, 0x00, 0x00, 0xB0])
 
+# ---------- 第二套协议：`aa 55 ...`（2026-10-07 实测发现）----------
+#
+# ⚠️ 这块麦克风的控制串口**并不说 `a5 01 04` 那套协议**。对着它说话，
+#    它吐的是 **5 字节的 `aa 55` 帧** —— 而 `awake_node.py`（`MIC_TYPE=xf` 选中的那个）
+#    只认 `a5 01 04` + 一段 JSON，所以**把这些帧全部当成噪声丢掉了**。
+#
+# 帧表与命令表**抄自厂商源码** `xf_mic_asr_offline/scripts/wonder_echo_pro_node.py:52-102`
+# （那个节点是 `mic_init.launch.py` 在 `MIC_TYPE != 'xf'` 时才会启动的分支）。
+# 这里只抄一张小表用于**解码**，不改厂商任何东西。
+_WONDER_FRAMES = {
+    'aa550300fb': '唤醒成功(wake-up-success)',
+    'aa550200fb': '休眠(Sleep)',
+}
+
+# 命令帧模板 `aa550001fb`，第 7~8 个字符（1-based）换成 1 起的命令序号。
+_WONDER_CMDS_ZH = [
+    '拔个萝卜', '拿给我', '开启颜色识别', '关闭颜色识别', '开启颜色分拣', '关闭颜色分拣',
+    '追踪红色', '追踪绿色', '追踪蓝色', '停止追踪', '夹取红色', '夹取绿色', '夹取蓝色',
+    '夹取球体', '夹取圆柱体', '夹取立方体', '关闭夹取', '开启垃圾分类', '关闭垃圾分类',
+    '前进', '后退', '左转', '右转', '停下', '漂移', '过来',
+    "去'A'点", "去'B'点", "去'C'点", '回原点', '导航搬运',
+]
+_WONDER_CMDS_EN = [
+    'pick a carrot', 'pass me please', 'start color recognition', 'stop color recognition',
+    'start color sorting', 'stop color sorting', 'track red object', 'track green object',
+    'track blue object', 'stop tracking', 'gripping red', 'gripping green', 'gripping blue',
+    'gripping the sphere', 'gripping the cylinder', 'gripping the cuboid', 'stop gripping',
+    'sort waste', 'stop sort waste', 'go forward', 'go backward', 'turn left', 'turn right',
+    'stop', 'drift', 'come here', 'go to A point', 'go to B point', 'go to C point',
+    'go back to the start', 'navigate and transport',
+]
+
+
+def _build_wonder_cmds():
+    """序号 → (中文, 英文)。**两张表按序号对齐**，所以两边都要留着 ——
+    只留一边会让人以为模块说的就是那一种语言（实际取决于模块侧的配置）。"""
+    out = {}
+    for i, (zh, en) in enumerate(zip(_WONDER_CMDS_ZH, _WONDER_CMDS_EN), start=1):
+        out['aa5500%02xfb' % i] = (zh, en)
+    return out
+
+
+_WONDER_CMDS = _build_wonder_cmds()
+
+
+def decode_wonder(frame_hex):
+    """把 5 字节 `aa55` 帧解码成一句话。认识就返回含义，不认识就返回 None。"""
+    if frame_hex in _WONDER_FRAMES:
+        return _WONDER_FRAMES[frame_hex]
+    if frame_hex in _WONDER_CMDS:
+        zh, en = _WONDER_CMDS[frame_hex]
+        return f'命令 #{int(frame_hex[6:8], 16)}：「{zh}」/「{en}」'
+    return None
+
+
+def wonder_frames(buf):
+    """从字节流里切出所有 `aa 55` 开头的 5 字节帧，返回 (帧列表, 剩余缓冲)。"""
+    frames = []
+    while len(buf) >= 5:
+        if buf[0] == 0xAA and buf[1] == 0x55:
+            frames.append(buf[:5])
+            buf = buf[5:]
+        else:
+            # 不是帧头就丢掉一个字节继续找（流里可能有噪声/半截帧）
+            buf = buf[1:]
+    return frames, buf
+
 
 def open_port(port):
     s = serial.Serial(None, 115200, serial.EIGHTBITS, serial.PARITY_NONE,
@@ -150,12 +217,61 @@ def listen(port, duration):
     return 0
 
 
+def decode_stream(port, duration):
+    """按 `aa 55` 帧协议解码（2026-10-07 实测发现的那套）。
+
+    这是本工装目前**最有信息量**的模式：它把"串口上到底在说什么"变成一句句话。
+    """
+    s = open_port(port)
+    s.reset_input_buffer()
+    t0 = time.monotonic()
+    buf = b''
+    counts = {}
+    unknown = []
+    print(f'解码监听 {port} 共 {duration:.0f} 秒（按 aa55 帧协议）……')
+    print('（现在请对麦克风说话）')
+    print()
+    while time.monotonic() - t0 < duration:
+        chunk = s.read(256)
+        if not chunk:
+            continue
+        buf += chunk
+        frames, buf = wonder_frames(buf)
+        for f in frames:
+            hexs = f.hex()
+            meaning = decode_wonder(hexs)
+            counts[hexs] = counts.get(hexs, 0) + 1
+            ts = f'[+{time.monotonic() - t0:6.2f}s]'
+            if meaning:
+                print(f'  {ts} ★ {hexs}  →  {meaning}', flush=True)
+            else:
+                print(f'  {ts} ? {hexs}  →  （表里没有这个帧）', flush=True)
+                unknown.append(hexs)
+    s.close()
+    print()
+    print(f'总帧数 {sum(counts.values())}：')
+    for hexs, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        meaning = decode_wonder(hexs) or '（未知帧）'
+        print(f'  {n:4d} × {hexs}  →  {meaning}')
+    if not counts:
+        print('  （一个 aa55 帧都没收到 —— 说话了吗？）')
+    print()
+    print('⚠️ 判读：')
+    print('  · 若 **只在你说话时** 出现 `aa550300fb` → 它是对语音的反应（VAD 或唤醒）')
+    print('  · 要区分「VAD」与「真的匹配上唤醒词」：**说一句不是唤醒词的话**看它响不响')
+    print('  · 若出现 `aa5500XXfb` 且 XX 对应某个命令 → **模块自己做了识别**，')
+    print('    直接把命令编号发出来（那就不需要 Jetson 侧跑 ASR）')
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='探测讯飞环形麦控制串口是否活着（诊断工装）')
     ap.add_argument('--port', default='/dev/ring_mic', help='控制串口（默认 /dev/ring_mic）')
     ap.add_argument('--listen', type=float, default=None,
                     help='纯监听模式，给定秒数（默认做握手探测）')
+    ap.add_argument('--decode', type=float, default=None,
+                    help='**按 aa55 帧协议解码**监听给定秒数 —— 信息量最大的模式')
     ap.add_argument('--no-modem-lines', action='store_true', help='跳过控制线读数')
     args = ap.parse_args()
 
@@ -170,6 +286,8 @@ def main():
     if not args.no_modem_lines:
         modem_lines(args.port)
 
+    if args.decode is not None:
+        return decode_stream(args.port, args.decode)
     if args.listen is not None:
         return listen(args.port, args.listen)
     return handshake_probe(args.port)
