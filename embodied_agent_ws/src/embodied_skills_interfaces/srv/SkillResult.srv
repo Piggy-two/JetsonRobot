@@ -1,0 +1,19 @@
+# 非阻塞地查询一个已受理任务的结果。
+#
+# 为什么是"查询"而不是"等待"：D-004 要求 Agent 发起技能后进入 WAIT，
+# 而 **WAIT 不能是阻塞等待** —— 那会把 Agent 变成一个不可取消、不可超时的单线程。
+# 唤醒靠 /embodied/skill/events，本服务只用于"顺便看一眼"与收尾核对。
+
+string task_id
+---
+bool known            # 网关认识这个 task_id 吗（不认识就别再问了）
+bool finished         # 是否已到终态
+string state          # 终态名；未结束则为当前状态
+bool verified         # ★ false = 「技能自报完成了，但**没有独立反馈**确认目标达成」。
+                      #   Control Skill 的 success 含义是"速度按时长发完了"（D-026），
+                      #   所以它在**任何情况下**都只能是 verified=false。
+                      #   上层**不得**把 verified=false 读成"已经到位"。
+string result_json    # 技能自己的返回，JSON object。字段含义由**应用**该技能的人解释。
+string message        # 人类可读说明（中文）
+float64 elapsed       # 从受理到结束的耗时（秒，单调钟）
+builtin_interfaces/Time stamp   # 结束时刻

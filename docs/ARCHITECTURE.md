@@ -86,7 +86,9 @@ Jetson Orin（L4T R36.4.3 / JetPack 6.x）是中央计算节点，承担：
 | 模块 | 说明 | 状态 |
 |---|---|---|
 | 语音识别 ASR | `xf_mic_asr_offline`（厂商离线 ASR） | ✅ 包已存在，❓ 待实机验收 |
-| Agent Runtime | Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway | 📋 |
+| **Skill Gateway + Registry** | `embodied_skill_gateway`（Overlay）：D-005 的六项检查 + **数据驱动的注册表** + 任务表与 8 状态机。🔒 **唯一被允许直接调用技能服务的进程** | ✅ 已实现（2026-10-07，D-029/D-030/D-031/D-032） |
+| **Hybrid Command Router** | `embodied_command_router`（Overlay）：安全词 / 确定性命令 / 复杂任务三分类 + 中文命令解析。安全词判定**复用** `estop.py` 的整句匹配 | ✅ 已实现（2026-10-07，D-006） |
+| Agent Runtime | Planner / Executor / Event Manager / Memory（**Skill Registry / Safety Gateway 已由上两行落地**） | 📋 第二批 |
 | 本地轻量 LLM | 后期加入，用于简单语言理解 / Tool Calling / 离线模式 | 📋 第一版不做 |
 | 云端 LLM 调用 | 复杂任务规划、多步骤推理、异常处理 | 📋 |
 | TensorRT 视觉推理 | GStreamer → CUDA → TensorRT → YOLO → Tracker | 📋 |
@@ -108,9 +110,11 @@ LLM
  ↓
 Agent Runtime            （Context / Tools / State / Memory / Execution / Safety）
  ↓
-Tool / Skill Registry
+Skill Gateway            ← 唯一准入点（D-005 的六项检查）
+ │                         **它查 Skill Registry（数据），而不是排在 Registry 后面**
+ ├─── Skill Registry（数据：有哪些技能 / 参数与策略边界 / 权限 / 超时）
  ↓
-Skill Manager
+Skill Manager            ← 第一版与 Gateway 同进程，是它内部的"派发"职责（D-029 决策 4）
  ↓
 ROS2 / Autonomous Runtime
  ↓
@@ -120,6 +124,14 @@ Linux Kernel / Driver
  ↓
 Hardware
 ```
+
+> 📌 **2026-10-07 更正（D-029）**：本节原来画的是 `Agent Runtime → Tool / Skill Registry →
+> Skill Manager`，把 **Registry 画成了一个并列的跳**。实际上 Registry 是 **Gateway 查的数据** ——
+> "有哪些技能、参数边界是多少、谁能调"是对着它查的，它本身不承担任何控制流。
+>
+> 📌 **已落地的部分（2026-10-07）**：`embodied_skill_gateway`（Skill Gateway + 注册表 + 任务表）
+> 与 `embodied_command_router`（Hybrid Command Router，§7）。
+> `Agent Runtime` 与 `Skill Manager` 的独立进程形态仍是设计。详见 **D-029 / D-030 / D-031**。
 
 ### 5.2 自下而上的反馈流
 
@@ -165,22 +177,42 @@ Agent
  ↓
 Tool / Skill Request
  ↓
-Safety Gateway
- ├── Schema Validation
- ├── Permission
- ├── Range Check
- ├── Timeout
- ├── Cancel
- └── Result Validation
+Safety Gateway            ← 2026-10-07 起为 embodied_skill_gateway（D-005 的落点）
+ ├── Schema Validation     ← checks.py：字段缺失/多余/类型/NaN/inf（**通用信封**，D-031）
+ ├── Permission            ← checks.py：按 principal 判定（**D-003 的唯一执行点**，D-029）
+ ├── Range Check           ← checks.py：**策略**边界，刻意比底层能力更严
+ ├── Timeout               ← task_table.py：deadline 用**单调钟**（#24）
+ ├── Cancel                ← 落到技能自己的 stop，**不是"不再等它"**（D-030）
+ └── Result Validation     ← checks.py：control-tier 恒 verified=false，且不得产出 ARRIVED（D-032）
  ↓
-Skill Manager
+Skill Manager              ← 第一版与 Gateway 同进程（D-029 决策 4）
 ```
+
+**六项检查各自"在哪一层被真正执行"**（这一列表比框图更重要）：
+
+| 检查 | 真正的执行点 |
+|---|---|
+| Schema Validation | `checks.validate_schema` —— 通用信封让它**有事可做**；强类型服务会让它退化成空检查 |
+| Permission | `checks.validate_permission` —— 注册表的 `allowed_principals` |
+| Range Check | `checks.validate_range` —— 含**跨字段**约束 `max_norm`（`(0.5, 0.5)` 的模长是 0.707，只看单字段放不住） |
+| Timeout | `task_table` 的 deadline + `skill_gateway.sweep()` |
+| Cancel | `skill_gateway._stop_skill()` —— **真的去停技能** |
+| Result Validation | `checks.validate_result` —— 含"`verified` 恒 false"这条**语义改写** |
+
+**反代理性质（网关存在的理由）**：它**必须能拒绝某些底层技能会接受的东西**。
+三类非透传行为 —— 权限（`agent.planner` 调 control 技能被拒）、更严的范围（0.8 m 被拒，
+而底层 `max_distance` 是 1.0）、语义改写（把开环的 `success` 标成 `verified=false`
+且不产出 `ARRIVED`）—— 每一条都有**回归测试**（`test/test_checks.py` 末尾）与**活体实测记录**。
 
 示例：
 
 ```text
 LLM:  move_relative(100m)
-系统: REJECTED — distance exceeds safety limit
+系统: REJECTED: 参数 x = 100m 超过策略上限 0.5m（该值会被记为 100.0m）
+
+实测（2026-10-07，车未动）：
+  agent.planner 调 control.move_relative → REJECTED: agent.planner 无权调用 …
+  参数 x = 0.8m                          → REJECTED: 参数 x = 0.8m 超过策略上限 0.5m
 ```
 
 ### 6.2 Safety Runtime（独立于 LLM）
@@ -214,8 +246,19 @@ Safety > Control > Skill > Agent
 | 类型 | 示例 | 路径 | 经 LLM |
 |---|---|---|---|
 | A. Safety Command | 停 / 急停 / 取消任务 / 别动 | Voice → Local Parser → Safety Runtime → Motor Stop | ❌ |
-| B. Deterministic Command | 向前走 0.5 米 / 右转 30° / 回到原地 | Voice → Local Parser → Control Skill | ❌ |
+| B. Deterministic Command | 向前走 0.5 米 / 右转 30° / 回到原地 | Voice → Local Parser → **Skill Gateway → Control Skill** | ❌ |
 | C. Agent Task | 去桌子旁找杯子，没有就去沙发旁找 | ASR → Agent Runtime → LLM Planner → Semantic Skill | ✅ |
+
+> 📌 **已落地（2026-10-07）**：`embodied_command_router` 实现上面这张表的分流；
+> B 类**多走一跳 Skill Gateway**（D-029/D-031：所有动作必须过六项检查，没有旁路）。
+> C 类**当前明确拒绝**（需要 Agent 规划，Phase 7 未实现）—— 不假装听懂。
+>
+> ⚠️ **`停止追踪` 不是安全词**：判定用**整句匹配**（`embodied_safety_runtime/estop.py`），
+> 子串匹配会让厂商词表里的 `停止追踪` / `停止分拣` 全部误触发整机急停。
+>
+> ⚠️ **`取消任务` 当前会锁存整机急停**：它在厂商安全词表里，而 Safety Runtime
+> **独立订阅同一条语音话题**并匹配 —— 这与命令路由器做什么无关。若要区分"温和取消"
+> 与"急停"，必须与 Safety Runtime 的默认词表**一起**决策（见本文件 §待补充决策）。
 
 ### 7.1 语音链路
 

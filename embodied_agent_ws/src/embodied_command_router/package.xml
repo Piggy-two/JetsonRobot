@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_command_router</name>
+  <version>0.1.0</version>
+  <description>
+    JetsonRobot 的 Hybrid Command Router（D-006 的落点）。
+    plan.md §10 / README.md §2.3 把命令分成三类，本包负责**分流**：
+
+      ① Safety Command       停 / 急停 / 别动   → 交给 Safety Runtime（不经 LLM）
+      ② Deterministic Command 向前走 0.5 米     → 本地解析 → Skill 网关 → Control Skill
+      ③ Agent Task           去桌子旁找杯子     → **明确拒绝**（需要 Agent 规划，Phase 7）
+        另有两类"不执行"：厂商状态文本（忽略）与解析不出来（拒绝，**不猜**）
+
+    ⚠️ 安全词判定**复用** `embodied_safety_runtime.estop.is_safety_command`，绝不重写 ——
+       那是整句匹配的安全依据，必须只有一处。
+
+    ⚠️ 本版**只吃文本**：厂商语音链路当前是死的（#25，控制串口完全沉默），
+       所以输入默认订在 `/embodied/command/text`；等语音修好后把参数指到
+       `/asr_node/voice_words` 即可，**不用改代码**。
+
+    ⚠️ **不处理「取消任务」**：它在厂商安全词表里，Safety Runtime 已独立订阅同一话题
+       并会**锁存整机急停**。本包再加一条"温和取消"会让同一个词有两个解释（详见 parser 顶部）。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>embodied_skills_interfaces</depend>
+  <depend>embodied_safety_runtime</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

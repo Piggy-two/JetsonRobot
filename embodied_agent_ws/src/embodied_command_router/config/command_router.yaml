@@ -1,0 +1,24 @@
+command_router:
+  ros__parameters:
+    # 文本输入。⚠️ 本版**只吃文本**：厂商语音链路当前是死的（#25，控制串口完全沉默）。
+    # 等语音修好后把它指到 /asr_node/voice_words 即可 —— **不用改代码**。
+    text_topic: /embodied/command/text
+
+    # Skill 网关。命令**必须**经它走准入，本节点不允许直接调技能服务。
+    gateway_service: /skill_gateway/invoke
+
+    # 网关发布任务级事件的话题，本节点靠它等终态。
+    event_topic: /embodied/skill/events
+
+    # 安全词转发目标。⚠️ Safety Runtime 有独立零速通道，这里是转发不是兜底。
+    estop_service: /safety_runtime/estop
+
+    # 受理之后最多等多久终态事件。超了就报"结果未知"，**不当成已完成**。
+    result_timeout: 30.0
+
+    # 等服务 / 等受理响应的上限。
+    service_wait_timeout: 3.0
+
+    # ⚠️ 三层闸门里属于本节点的那一层（D-033）。默认 false：不转发可能引起运动的命令。
+    # 打开它**不等于**车会动 —— 还要看网关的 allow_motion 与 Motor Driver 的 dry_run。
+    allow_motion: false

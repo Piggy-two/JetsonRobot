@@ -1,0 +1,32 @@
+# Agent（agent_runtime）与本地确定性路由器调用技能的**唯一**入口。
+#
+# 为什么是「通用信封」而不是逐技能强类型服务（D-031）：
+#   1) 六项安全检查里有一项是 **Schema Validation**（D-005 / plan.md §19）。
+#      若用强类型服务，ROS 的反序列化已经替我们校验了 schema，**这一项就退化成空检查**。
+#      信封把校验从"传输层顺手做的"变成**显式策略**：字段缺失 / 多余 / 类型错 /
+#      NaN / inf / 跨字段约束，全在 checks.py 里，可离线单测。
+#   2) 注册表是**数据**（config/skill_registry.yaml）。强类型服务会让"加一个技能"
+#      变成"改接口包 + 重编译"，注册表就不再是数据驱动。
+#   3) 上层（尤其 Phase 7 的 LLM tool calling）是**动态**的；信封与 tool-call 同构。
+#
+# ⚠️ **语义没有因此丢失**，只是换了地方写：
+#      · 参数含义 / 单位 / 范围 / 权限 / 超时  → 注册表（数据）
+#      · 坐标系 / 正方向 / 有效性边界          → 底层的强类型 .srv（MoveRelative / Rotate …）
+#    无类型**只被限制在分发层**，没有渗进语义边界。
+#
+# 🔒 **铁律：除本网关外，任何人不得直接调用技能服务。**
+
+string principal      # 调用方身份，Permission 检查按它判定。约定名字见注册表的 allowed_principals：
+                      #   'router.deterministic' —— D-006 的本地确定性解析器（可调少量 control 技能）
+                      #   'agent.planner'       —— Agent 规划器（**不得**调 control 技能，见 D-003）
+                      #   'operator.manual'     —— 人工/验收工装
+                      # ⚠️ 未登记的 principal 一律拒绝，不要"默认放行"。
+string skill          # **注册表里的技能名**，不是 ROS 服务名。例如 'control.move_relative'。
+string args_json      # JSON object（**必须**是 object，不是数组/标量）。按注册表里该技能的 schema 校验。
+string request_id     # 调用方生成，用于日志串联与取消关联；可为空（网关会补一个）。
+---
+bool accepted         # false = 未通过准入。此时 task_id 为空，message 说明原因。
+string task_id        # 受理后用于 ~/cancel、~/get_result 与事件关联。
+string state          # 受理时的状态名（枚举与语义见 SkillEvent.msg 的注释）。
+string message        # 拒绝原因（中文、可读）。**供人看，不要写程序去解析它。**
+float64 timeout_s     # 网关对该技能采用的超时策略值（来自注册表），受理时一并告知。

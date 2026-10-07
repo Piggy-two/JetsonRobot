@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_skill_gateway</name>
+  <version>0.1.0</version>
+  <description>
+    JetsonRobot 上层 Skill 网关（架构分层：Agent 与 Skill 之间）。
+    D-005 要求「所有动作必须经过 Tool / Skill Safety Gateway（Schema 校验 / 权限 /
+    范围检查 / 超时 / 取消 / 结果校验）」，本包是那条要求的**第一个落点**。
+
+    🔒 **它是唯一被允许直接调用技能服务的进程。** 其余任何人（Agent、路由器、
+    验收工装）都必须经 `~/invoke` 走准入。
+
+    ⚠️ 它**不是**一个单纯的转发器 —— 判据是"必须能拒绝某些底层技能会接受的东西"：
+      ① Permission：agent.planner 调 control 技能被拒（D-003 的唯一执行点）；
+      ② 更严的 Range：策略上限刻意小于底层技能的可行域；
+      ③ 语义改写：control-tier 的结果恒为 verified=false，且不得产出 ARRIVED（D-032）。
+
+    本版注册 control.* 与 primitive.* 技能；task-tier（Autonomous / Semantic）随第二批引入。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>embodied_skills_interfaces</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

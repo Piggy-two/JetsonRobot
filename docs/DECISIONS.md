@@ -1027,11 +1027,226 @@ Motor Driver 进程自己死了。它既不报错、也没人转告，而底盘�
 
 ---
 
+## D-029：上层控制流三方对齐 —— **Registry 是数据、Gateway 是唯一准入点、Skill Manager 是执行器**
+
+**背景（2026-10-07）**：`plan.md` §19、`ARCHITECTURE.md` §5.1、D-003 三处对"Agent 怎么到达 Skill"说法不一致：
+
+| 出处 | 说法 |
+|---|---|
+| `plan.md` §19 | `Agent → Safety Gateway → Skill Manager` |
+| `ARCHITECTURE.md` §5.1 | `Agent → Tool/Skill Registry → Skill Manager`（**Gateway 没出现**） |
+| D-003 | 「Agent **只能**调用 Semantic Skill」 |
+
+三者**看起来**是三条不同的路，其实是在描述同一跳里的三个职责。
+
+**决策 1：统一为一条控制流。**
+
+```text
+Agent（agent_runtime）
+   ↓  ~/invoke（SkillInvoke 信封，D-031）
+Skill Gateway          ← 唯一准入点：六项检查（D-005）+ 任务生命周期
+   ├─ 查 Skill Registry（**数据**：有哪些技能、参数与策略边界、权限、超时）
+   └─ 派发到技能           ← 这一部分即"Skill Manager"的职责
+   ↓  强类型 .srv（复用既有接口）
+Control / Autonomous / Semantic Skill
+```
+
+`ARCHITECTURE.md` §5.1 那一行改写为
+`Agent → Skill Gateway（查 Registry）→ Skill Manager → ...`，
+并在 §6.1 的 Gateway 框图里注明 **Registry 是 Gateway 查的数据，不是一个并列的跳**。
+
+**决策 2：D-003 的「Semantic Skill」修正为「task-tier（Autonomous + Semantic）」。**
+D-003 写"Agent 只能调 Semantic Skill"，但 `ARCHITECTURE.md` §3/§8 又让 Agent 调
+`navigate_to` —— 那是 **Autonomous** Skill。两处矛盾。统一表述为**task-tier**：
+Autonomous 与 Semantic 同属"Agent 可以命名"的那一层，Control 及以下不属于。
+
+**决策 3：D-003 靠 **Permission 检查**执行，不靠"物理上没有别的入口"。**
+注册表里每个技能声明 `allowed_principals`；`control.*` 一律**不含** `agent.planner`。
+Gateway 的 Permission 检查是**唯一**能真正执行这条架构红线的地方 ——
+也正因如此它不能是空的。
+
+> 顺带纠正一个可能的误解：D-003 说的"ROS Topic"指**执行器/感知话题**（`cmd_vel`、GPIO…），
+> **不是** D-011 认可的 Skill IPC 通道。Agent 调 Gateway 的 service 不违反 D-003，
+> 正如 Agent 调 Skill Manager 不违反它。
+
+**决策 4：第一版 `Skill Manager` 不拆成独立进程。**
+`registry` / `checks` / `task_table` / `dispatch` 是同一个包里的**模块**。
+边界体现在模块与测试上，不体现在进程数上 —— 进程越少、失效模式越少。
+文档注明"**可拆**，接口不变"。
+
+**实现**：`embodied_agent_ws/src/embodied_skill_gateway/`。
+
+---
+
+## D-030：**Agent ↔ Skill Manager 的 IPC 形式**（填掉本文件原来的"待定"格）
+
+**背景**：本文件「待补充的决策」表里，**唯一被点名"仍待定"**的就是这一格；
+D-011 也写着"具体 IPC 形式在实现对应 Skill 时确定，并在此追加决策"。
+
+**决策：三件套，全部 service / topic，**不用 action**。**
+
+| 件 | 形式 | 作用 |
+|---|---|---|
+| `~/invoke`（`SkillInvoke`） | **service** | 准入 + **立即返回** `task_id`（异步受理） |
+| `/embodied/skill/events`（`SkillEvent`） | **topic** | 任务级事件；`WAIT` 的唤醒载体 |
+| `~/cancel` / `~/get_result` / `~/list` | **service** | 取消 / 查询 / 注册表只读投影 |
+
+**理由：**
+
+1. **事件用 topic 而不是 service 响应或 action feedback**：D-004 要的是"Agent 发起后进入
+   WAIT，只有任务级事件唤醒"—— 这是**一对多、异步、可被多方订阅**（Agent、日志、
+   将来的 TTS）的东西，天然是 topic。
+2. **WAIT 不阻塞**：受理后把 `task_id` 记下来**立刻返回事件循环**，Event Manager 按
+   `task_id` 匹配唤醒。**用阻塞等待实现 WAIT，会把 Agent 变成不可取消、不可超时的单线程**，
+   与 D-004 的意图正好相反。
+3. **超时 = 取消 + 终态事件**，不是"悄悄不再等"。deadline 用 **`time.monotonic()`**
+   （本机墙上钟会被 NTP 步进，#24 / DEV_NOTES 坑 13）。
+4. **取消必须落到技能的 stop**，不能只把本地等待标记为放弃 ——
+   否则"车还在动，上层以为任务结束了"，接着就会把下一个规划建立在假前提上。
+   停车的**最终手段**始终是 Safety Runtime 的独立零速通道（D-027）；
+   本机制是工艺流程上的取消，不是安全兜底。
+5. **不用 action**：本层要的是**离散任务事件**，不是连续进度；且 rclpy 的
+   goal-handle / cancel 回调 / result future 是最难离线单测、最容易藏"未验证"bug 的
+   三处。**升级路径**见下。
+
+**升级路径（写在这里，免得后人以为 action 是被忽略的）**：
+当 task-tier 技能具备**真实的过程反馈**（里程计闭环 / SLAM / 视觉跟踪）时，
+把 `invoke` + 事件换成 `ExecuteSkill.action`：`feedback` 携带 `progress`
+（**那时它才有真实含义**，不再是 -1），`result` 携带终态。
+`SkillInvoke` 的字段形状（`task_id` / `state` / `message`）刻意与之对齐，使调用方改动最小。
+**事件话题保留**作为跨订阅者的任务级广播。
+
+**其它约束**：
+- **每技能同时只允许一个在途任务**（沿用 D-026 决策 2 的"不排队"原则）——
+  不排队是为了让"车现在到底在不在动"永远可回答。
+- 任务表**有界**（默认 200）：满了先淘汰**最老的终态**记录；一个终态都没有时
+  **拒绝受理新任务**，而不是丢掉还在跑的任务、也不是无界增长（内存只有 7.4 GiB，#7）。
+
+**实现**：`embodied_skills_interfaces/srv/SkillInvoke|SkillResult|SkillCancel|SkillList.srv`
++ `msg/SkillEvent.msg`；`embodied_skill_gateway/skill_gateway.py` + `task_table.py`。
+
+---
+
+## D-031：Skill 网关对外用**通用信封**，不用逐技能强类型服务
+
+**背景**：Gateway 是对外唯一入口，它长什么样是一个必须现在定的选择。
+
+**决策：`SkillInvoke { principal, skill, args_json, request_id }` 通用信封；
+不提供 `/skill_gateway/move_relative` 这类逐技能强类型服务。**
+
+**理由：**
+
+1. **强类型会让六项检查里的「Schema Validation」变成空检查。**
+   ROS 的反序列化已经替我们校验了 schema —— 那么这一项就没有任何事可做。
+   D-005 的六项是硬约束，**不该有一项在设计上就是空的**。信封把它变成**显式策略**：
+   字段缺失 / 多余 / 类型错 / NaN / inf / 跨字段约束，全在 `checks.py` 里，可离线单测。
+2. **"注册表是数据"这个要求与强类型自相矛盾。** 若 Gateway 暴露强类型服务，
+   "加一个技能"就变成"改接口包 + 重编译"，注册表就不再是数据驱动。
+3. **将来 LLM tool calling 天然是动态的**（Phase 7）。信封与 tool-call 同构；
+   `~/list` 的投影可直接当 tool schema 用。
+4. **语义并没有因此丢失**，只是换了地方写：
+   | 语义 | 写在哪 |
+   |---|---|
+   | 参数含义 / 单位 / 范围 / 权限 / 超时 | **注册表**（`config/skill_registry.yaml`，数据） |
+   | 坐标系 / 正方向 / 有效性边界 | **底层强类型 `.srv`**（`MoveRelative` / `Rotate` …） |
+   **无类型只被限制在"分发层"，没有渗进语义边界。** 这与本项目讨厌
+   `Float64MultiArray` 的理由不冲突 —— 那是讨厌**语义没被写下来**。
+
+**代价与缓解**：
+
+| 代价 | 缓解 |
+|---|---|
+| 失去 ROS 反序列化层的类型安全，错误推迟到运行时校验 | 校验在 `checks.py` 穷举单测；信封是**唯一**入口，爆炸半径被限制在准入点 |
+| `ros2 service call` 手工调试不如强类型直观 | `~/list` 可读投影 + 中文拒绝原因（指明是哪个字段、期望什么） |
+
+**升级路径**：若有非 Agent 的 **C++ 客户端**需要编译期类型，在 Gateway 上**追加**
+强类型 façade（如 `~/move_relative`），实现为**同一个注册表 / 校验 / 任务表的薄适配器**，
+不新增策略 —— 即 **typed façade / generic core**。
+若某技能需要**流式**参数（图像、点云），单独开 typed 通道并在注册表标记 `transport: custom`。
+
+**实现**：`embodied_skill_gateway/checks.py`（`validate_schema`）+ `registry.py`。
+
+---
+
+## D-032：8 状态机只服务 **task-tier** 技能；**Control Skill 不进状态机**
+
+**背景**：`plan.md` §21 定了 8 个状态
+（`STARTED / RUNNING / ARRIVED / TARGET_FOUND / TARGET_LOST / BLOCKED / FAILED / CANCELLED`）。
+
+**问题**：Control Skill 的 `success` 含义是「**速度按时长发完了**」，不是「走到位了」（D-026）。
+那 8 个状态里**没有任何一个能诚实表达它**：
+
+- 映射成 `ARRIVED` → **撒谎**。Agent 会以为到位了，**后续规划建立在假前提上**。
+- 映射成 `TARGET_FOUND` → 更离谱。
+- 其余终态都是失败语义 → 也不对。
+
+硬塞只能编造。而这是一个**安静的、会连锁的**错误 —— 本项目最该避免的那一类。
+
+**决策：两个词汇表，只在 `FINISHED` 这一处分叉。**
+
+| 层级 | 状态 |
+|---|---|
+| task-tier（Autonomous / Semantic） | 上面 8 个；后 6 个是终态，**也是唯一会唤醒 Agent 的状态**（D-004） |
+| control-tier（Control Skill） | `RUNNING / FINISHED / FAILED / CANCELLED` |
+
+> ⚠️ **`FINISHED` 不是那 8 个任务状态之一**，它的含义**只有**「技能返回了」，
+> 绝不表示"到位了 / 达成目标了"。
+
+⚠️ **别把"control-tier 不唤醒"误推广**：`FAILED` / `CANCELLED` 是两个词汇表**共用**的
+（它们本来就是任务终态），所以它们**仍然会唤醒 Agent**。只有 `FINISHED` 不唤醒。
+
+**配套**：所有结果与事件一律带 **`verified: false`** —— 当前**没有任何独立反馈**
+（里程计闭环 / 视觉）能确认目标达成，所以"验证通过"这件事**今天在物理上无法成立**。
+上层**不得**把 `verified=false` 读成"已经到位"。
+（`checks.validate_result` 里写死了这一点，并有单测钉住。）
+
+**实现**：`embodied_skill_gateway/task_state.py`（纯逻辑，含迁移表与不变式）。
+
+---
+
+## D-033：未验证代码的三层闸门与**三级验证清单**
+
+**背景**：用户要求"轮不到真机验证的代码可以写，但必须明确标注未验证"。
+但真正危险的不是"代码没测过"，而是**默认值把未验证逻辑接进了运动路径**。
+
+**决策 1：三层互相独立的闸门，默认全关。**
+
+| # | 闸门 | 默认 | 拦住什么 |
+|---|---|---|---|
+| ① | 上层节点的 `allow_motion`（命令路由器、Skill 网关） | **false** | 上层**派发**会动的技能 |
+| ② | Motor Driver 的 `dry_run` | **true** | 发到厂商 `/cmd_vel` |
+| ③ | Control Skill 的底盘前置条件 | — | 底盘状态不新鲜 / 未确认在线时拒绝运动 |
+
+任意一层没打开，车都动不了。**打开①不等于车会动** —— 这正是"独立"的意思。
+
+**决策 2：三级验证清单，只有第三级才算"未验证"。**
+
+| 级别 | 含义 |
+|---|---|
+| (a) 离线单测通过 | 纯逻辑可证伪 |
+| (b) dry-run 集成通过 | 链路跑通、数值对得上，但**车没动** |
+| (c) **真机未验证** | 只有这一级进"未验证清单" |
+
+**标注约定**：源码里写 `# UNVERIFIED(real-motion): ...`；
+`PROJECT_STATUS.md` 单列「未经验证的代码」一节。
+
+**决策 3：绝不为任何理由新增对 `/cmd_vel` 的发布者。**
+最危险的接线**不是**网关，而是 Safety Runtime 已经占用的那条 `/cmd_vel` 通道 ——
+它绕过一切默认值直接发布（D-027 用"唯一发布语句就是 `publish(Twist())`"保证结构上只发零）。
+上层**只有**经由 Motor Driver 这一条执行路径。
+
+**决策 4：本机时钟不当时间基准。** 超时 / 时限一律 `time.monotonic()`
+（#24 / DEV_NOTES 坑 13：墙上钟会被 NTP 步进，实测已把一个 10.000 Hz 读数算成 16.85 Hz）。
+
+---
+
 ## 待补充的决策（尚未确定）
 
 | 议题 | 说明 |
 |---|---|
 | **底盘选型理由** | 实机为麦克纳姆轮厂商底盘，但 `plan.md` 未记录选型原因。需用户补充：为什么选麦轮（全向移动 / 场地限制 / 成本 / 厂商方案） |
-| ~~**跨语言 IPC 具体形式**~~ | ✅ **Control Skill 层已定**（**D-026**：用 service 而非 action，理由与升级路径见该决策）。**Agent ↔ Skill Manager 那一层仍待定** |
+| ~~**跨语言 IPC 具体形式**~~ | ✅ **Control Skill 层已定**（**D-026**）。✅ **Agent ↔ Skill Manager 那一层也已定**（**D-030**：异步 invoke service + 事件 topic + cancel/result service，含 action 升级路径） |
+| **「取消任务」的语义** | 它在厂商安全词表 `DEFAULT_SAFETY_PHRASES` 里，**Safety Runtime 会独立订阅同一条语音话题并锁存整机急停**。若要区分"温和取消"与"急停"，需要与 Safety Runtime 的默认词表**一起**决策 —— 不能在命令路由器里单方面改语义。详见 `embodied_command_router` 的 parser 顶部注释 |
+| **Control Skill 的闭环反馈源** | 见 D-028 遗留：用什么当"走了多远"的反馈（`/odom` 不能当存活判据，D-021），以及如何与 LiDAR / 视觉共存 |
 | **本地小模型选型** | Phase 7 议题，待定 |
 | **Cloud LLM 选型** | 待定；涉及成本、延迟、隐私与离线降级策略 |

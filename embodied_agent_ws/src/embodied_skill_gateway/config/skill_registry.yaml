@@ -1,0 +1,96 @@
+# Skill 注册表 —— 网关的**数据**（不是代码）。
+#
+# 每个技能的：怎么调（transport/target/srv_type）、允不允许要（params 的 min/max 与
+# max_norm）、谁能调（allowed_principals）、等多久（timeout_s）。
+#
+# ⚠️ 这里的 min/max 管的是「**允不允许要**」；底层 Control Skill 的 `max_distance`
+#    管的是「**能不能做到**」。两层都要，语义不同。而且**本表必须比底层更严或相等** ——
+#    比底层还宽的话，放行的请求会一路走到下层再被拒，上层策略就名存实亡了
+#    （`registry.py:check_against_control_skills_limits` 会在启动时抓住这种配置错误）。
+#
+# ⚠️ `allowed_principals` 是 D-003「Agent 不得触达控制技能」**唯一**能真正执行的地方。
+#    所以 control.* 一律**不含** `agent.planner` —— 这不是疏漏，是那条架构红线本身。
+
+skills:
+
+  control.move_relative:
+    tier: control
+    description: 机体坐标系下平移 (x, y) 米，不改变朝向。x 前 / y 左（REP-103）。
+    transport: service
+    target: /control_skills/move_relative
+    srv_type: embodied_skills_interfaces/MoveRelative
+    timeout_s: 15.0          # Control Skill 最长约 1.0 m / 0.15 m/s ≈ 6.7 s，留足余量
+    cancel_target: /control_skills/stop
+    allowed_principals:
+      - router.deterministic   # D-006 的本地确定性解析器
+      - operator.manual        # 人工/验收工装
+      # ⚠️ 刻意不含 agent.planner —— 见文件头
+    params:
+      - {name: x, type: float, unit: 'm', min: -0.5, max: 0.5}
+      - {name: y, type: float, unit: 'm', min: -0.5, max: 0.5}
+    # 单字段各在 ±0.5 内**不等于**位移在 0.5 内：(0.5, 0.5) 的模长是 0.707。
+    # 这条跨字段约束才是真正的"单次位移上限"，且刻意小于底层的 max_distance = 1.0。
+    max_norm:
+      params: [x, y]
+      max: 0.5
+      note: 单次位移策略上限
+
+  control.rotate:
+    tier: control
+    description: 原地旋转 angle 弧度，逆时针为正（REP-103，绕 +z）。
+    transport: service
+    target: /control_skills/rotate
+    srv_type: embodied_skills_interfaces/Rotate
+    timeout_s: 15.0          # 最长约 π / 0.40 rad/s ≈ 7.9 s
+    cancel_target: /control_skills/stop
+    allowed_principals:
+      - router.deterministic
+      - operator.manual
+    params:
+      - {name: angle, type: float, unit: 'rad', min: -3.141592653589793, max: 3.141592653589793}
+
+  control.stop:
+    tier: control
+    description: 立即中止当前运动（不等待）。**这是工艺流程上的中止**，不是安全兜底 ——
+      安全兜底始终是 Safety Runtime 的独立零速通道（D-027）。
+    transport: service
+    target: /control_skills/stop
+    srv_type: std_srvs/Trigger
+    timeout_s: 5.0
+    allowed_principals:
+      - router.deterministic
+      - operator.manual
+
+  primitive.sector_min_range:
+    tier: primitive
+    description: 查询某扇形扇区内的最近回波距离。**只读，不产生任何运动。**
+    transport: service
+    target: /lidar_driver/sector_min_range
+    srv_type: embodied_skills_interfaces/SectorMinRange
+    timeout_s: 5.0
+    allowed_principals:
+      # 只读查询不碰执行器，所以 Agent 允许调用 —— Permission 是**按技能**的策略，
+      # 不是"一律不给 Agent"的一刀切。
+      - agent.planner
+      - router.deterministic
+      - operator.manual
+    params:
+      - {name: center, type: float, unit: 'rad', min: -3.141592653589793, max: 3.141592653589793}
+      - {name: width, type: float, unit: 'rad', min: 0.0, max: 6.283185307179586}
+      - {name: max_range, type: float, unit: 'm', min: 0.0, max: 25.0}
+
+  primitive.path_clear:
+    tier: primitive
+    description: 判断某扇形方向在给定距离内是否通畅。⚠️ `clear=true` 只表示**这个扇形、
+      这个距离内**没有回波，**不**保证整条路径安全（D-028）。
+    transport: service
+    target: /lidar_driver/path_clear
+    srv_type: embodied_skills_interfaces/PathClear
+    timeout_s: 5.0
+    allowed_principals:
+      - agent.planner
+      - router.deterministic
+      - operator.manual
+    params:
+      - {name: width, type: float, unit: 'rad', min: 0.0, max: 6.283185307179586}
+      - {name: clear_range, type: float, unit: 'm', min: 0.0, max: 25.0}

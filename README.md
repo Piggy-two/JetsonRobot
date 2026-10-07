@@ -154,14 +154,14 @@ ros2 action list
 |---|---|---|
 | **Phase 0** | 环境与硬件启动验收（底盘 / LiDAR / 相机 / 麦克风 / 扬声器 + 接口清单） | 🚧 **进行中**（LiDAR ✅ / 底盘运动 ✅ / 通信中断 ✅ / **相机 ✅ 已完全收口** / **语音音频硬件 ✅**；⚠️ **语音唤醒实测不通**、急停链路用户已暂缓） |
 | **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅ 无遗留**（`embodied_camera_driver`，D-023）；**电机 Driver ✅ 已落地、干跑 + 链路失联验证通过**（`embodied_motor_driver`，**D-025**，含**失联检测/告警/恢复后拒绝静默复动**；**默认 `dry_run=true` 不驱动底盘**；真机运动测试待人工看护时做）；**LiDAR Primitive ✅ 已落地**（`embodied_lidar_driver`，**D-028** —— 厂商 `/scan` 本身是对的，故做**查询原语**而非收口：扇区最近距离 / 通畅判定；对真实雷达独立重算交叉验证**逐位一致**）。**Phase 1 三个 Driver 齐了** |
-| Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | 🚧 **已开始** —— `embodied_control_skills` 落地 `move_relative` / `rotate` / `stop`（**D-026**，Service 接口 + 项目自己的 `.srv`），**干跑验证 16/16 通过**（用**速度积分**量位移，车不动）。⚠️ **第一版是开环**：`success` = "速度按时长发完了"，**不是走到位** |
+| Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | 🚧 **已开始** —— `embodied_control_skills` 落地 `move_relative` / `rotate` / `stop`（**D-026**，Service 接口 + 项目自己的 `.srv`），**干跑验证 16/16 通过**（用**速度积分**量位移，车不动）。⚠️ **第一版是开环**：`success` = "速度按时长发完了"，**不是走到位**。**2026-10-07 起控制动作多走一跳 `embodied_skill_gateway`**（D-029/D-031：六项检查，**没有旁路**） |
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
 | Phase 4 | Semantic Skills（`search_object` / `inspect_area` / `patrol_route` / `return_home`） | ⬜ 未开始 |
 | Phase 5 | Voice System（Wake Word / VAD / ASR / TTS） | ⬜ 未开始 |
-| Phase 6 | Agent Runtime（Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway） | 🚧 **Safety 部分提前开始**（**D-027**：`embodied_safety_runtime` 第一版——**本地安全指令通路**（不经过 LLM、不经过厂商节点）+ **独立零速通道**（不依赖 Motor Driver 存活）+ **Motor Driver 停更看门狗**（它挂了自动接管、未恢复时拒绝解除）。因为**本机没有物理急停**，#22 这条约束今天就压着，不必等 Agent 层建好）。其余未开始 |
+| Phase 6 | Agent Runtime（Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway） | 🚧 **Safety 部分提前开始**（**D-027**：`embodied_safety_runtime` 第一版——**本地安全指令通路**（不经过 LLM、不经过厂商节点）+ **独立零速通道**（不依赖 Motor Driver 存活）+ **Motor Driver 停更看门狗**（它挂了自动接管、未恢复时拒绝解除）。因为**本机没有物理急停**，#22 这条约束今天就压着，不必等 Agent 层建好）。**2026-10-07 又落地两块**：**`embodied_skill_gateway`（D-029~D-032）** 与 **`embodied_command_router`（D-006）** —— 架构里第一次有了"Agent 那一侧"：命令 → 解析 → **网关六项检查** → 技能，**离线 143 项单测 + dry-run 端到端 16/16 全过**。⚠️ **但车全程没动**，进「未经验证的代码」清单。**其余（Planner / Executor / Event Manager / Memory）属第二批** |
 | Phase 7 | Hybrid LLM（Rule Engine + Cloud LLM + 预留 Local Small LLM） | ⬜ 未开始 |
 
-> **仓库现状**：包含设计方案（`docs/plan.md`）、Phase 0 验收工装（`tools/`）、以及 **Overlay 业务代码工作区 `embodied_agent_ws/`**（首个节点为相机 Driver `embodied_camera_driver`，2026-10-05 落地，**D-023**；第二个是电机 Driver `embodied_motor_driver`，2026-10-06 落地，**D-025**；随后是 Control Skill `embodied_control_skills` 与接口包 `embodied_skills_interfaces`，**D-026**；再后是 Safety Runtime `embodied_safety_runtime`，**D-027**；以及 LiDAR Primitive `embodied_lidar_driver`，**D-028**）。后续业务代码按上表顺序在该工作区内引入。
+> **仓库现状**：包含设计方案（`docs/plan.md`）、Phase 0 验收工装（`tools/`）、以及 **Overlay 业务代码工作区 `embodied_agent_ws/`**（首个节点为相机 Driver `embodied_camera_driver`，2026-10-05 落地，**D-023**；第二个是电机 Driver `embodied_motor_driver`，2026-10-06 落地，**D-025**；随后是 Control Skill `embodied_control_skills` 与接口包 `embodied_skills_interfaces`，**D-026**；再后是 Safety Runtime `embodied_safety_runtime`，**D-027**；以及 LiDAR Primitive `embodied_lidar_driver`，**D-028**；**2026-10-07 再落地上层两块**——Skill 网关 `embodied_skill_gateway`（**D-029~D-032**，含数据驱动注册表与 8 状态机）与命令路由器 `embodied_command_router`（**D-006**））。**共 8 个包**。后续业务代码按上表顺序在该工作区内引入。
 
 **第一版明确不做**：机械臂、多机器人、强化学习导航、复杂 RAG、大型本地 VLM、自动充电。
 
@@ -179,7 +179,7 @@ ros2 action list
 | [`docs/DEV_NOTES.md`](docs/DEV_NOTES.md) | **开发思路、踩坑与解法** —— 方法论（如何给测不准的量造独立基准）与可复现的教训 |
 | [`embodied_agent_ws/`](embodied_agent_ws/) | **本项目 Overlay Workspace**（业务代码在此；`build/ install/ log/` 不进 Git） |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code 长期开发规则 |
-| [`tools/`](tools/) | Phase 0 验收工装：`phase0_chassis_motion_acceptance.py`（底盘六向运动验收）、`lidar_rotation_probe.py`（用 LiDAR 独立测原地旋转角速度，丢帧免疫）、`camera_latency_probe.py`（用 `v4l2` 控制项当"世界端探针"，分离相机**端到端延迟**与**时间戳偏移**；`--topic` 可测任意话题（含 Overlay 输出）、`--repeat` + `--jitter` 做**多事件取均值**以标定 `pipeline_latency`）、`lidar_environment_probe.py`（把 LiDAR 的距离-角度剖面量化成表 + 柱状图，用于判定近场回波是**机器人自身结构**还是**外部环境** —— 判据是"换个摆位再测一次，看回波跟不跟着车走"）、`mic_serial_probe.py`（探测讯飞环形麦**控制串口** `/dev/ring_mic` 是否还活着：握手应答 + 纯监听模式。厂商 `awake_node` 的握手等待**没有超时**，它一卡住外面完全看不出来，这个工装把它变成明确读数 —— ⚠️ **收到 0 字节 ≠ 波特率不对**）。**验收用，不是运行时组件** |
+| [`tools/`](tools/) | Phase 0 验收工装：`phase0_chassis_motion_acceptance.py`（底盘六向运动验收）、`lidar_rotation_probe.py`（用 LiDAR 独立测原地旋转角速度，丢帧免疫）、`camera_latency_probe.py`（用 `v4l2` 控制项当"世界端探针"，分离相机**端到端延迟**与**时间戳偏移**；`--topic` 可测任意话题（含 Overlay 输出）、`--repeat` + `--jitter` 做**多事件取均值**以标定 `pipeline_latency`）、`lidar_environment_probe.py`（把 LiDAR 的距离-角度剖面量化成表 + 柱状图，用于判定近场回波是**机器人自身结构**还是**外部环境** —— 判据是"换个摆位再测一次，看回波跟不跟着车走"）、`mic_serial_probe.py`（探测讯飞环形麦**控制串口** `/dev/ring_mic` 是否还活着：握手应答 + 纯监听模式。厂商 `awake_node` 的握手等待**没有超时**，它一卡住外面完全看不出来，这个工装把它变成明确读数 —— ⚠️ **收到 0 字节 ≠ 波特率不对**）、`upper_layer_dryrun_acceptance.py`（**上层干跑端到端验收**：把 `/embodied/motor/cmd_vel_dryrun` 上的速度**对时间积分**，于是"车一动不动"也能量出"被命令走了多远"—— 16 项判据含**事件契约**与"被拒请求不得产生任何事件"）。**验收用，不是运行时组件** |
 
 ---
 

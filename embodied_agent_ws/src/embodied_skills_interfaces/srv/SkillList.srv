@@ -1,0 +1,11 @@
+# 注册表的**只读投影**。
+#
+# 用途：
+#   ① 上层启动时自检 —— "我依赖的技能，注册表里真的有吗"；
+#   ② Phase 7 由它生成 LLM 的 tool schema（信封 + 注册表 schema 与 tool-call 同构，见 D-031）；
+#   ③ 人排查"到底有哪些技能可用"。
+#
+# 🔒 它是**只读**的：不暴露任何可直接执行的控制入口，也不会泄露底层 ROS 服务名
+#    作为可用入口 —— 知道名字不等于能调用，调用一律要过 ~/invoke 的准入。
+---
+string skills_json    # JSON object：{技能名: {tier, schema, limits, timeout_s, allowed_principals}}

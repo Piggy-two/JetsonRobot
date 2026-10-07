@@ -1,0 +1,30 @@
+skill_gateway:
+  ros__parameters:
+    # 注册表文件。留空 = 用包 share 目录下的 config/skill_registry.yaml。
+    # 显式给路径便于测试时换一份注册表。
+    registry_file: ''
+
+    # 任务级事件的发布话题。**只有本节点能发它**（技能自己不得直接发），
+    # 这样状态序列不会因技能实现不同而错乱。
+    event_topic: /embodied/skill/events
+
+    # 任务表上限。满了先淘汰**最老的终态**记录；一个终态都没有时**拒绝受理新任务**，
+    # 而不是无界增长（内存只有 7.4 GiB，厂商栈已占约 5.5 GiB，#7）。
+    max_tasks: 200
+
+    # 超时扫描频率。deadline 用单调钟判定（本机墙上钟会被 NTP 步进，#24）。
+    sweep_rate: 10.0
+
+    # 等服务可用最长等多久。超过就判失败 —— 不要让一个"底层没在跑"的请求
+    # 悄悄挂在那里。
+    service_wait_timeout: 3.0
+
+    # ⚠️ 三层闸门的第一层（D-033）。默认 false：**不派发可能引起运动的技能**。
+    #
+    # 打开它**不等于**车会动 —— 车会不会动还取决于：
+    #   ② Motor Driver 的 dry_run（默认 true）
+    #   ③ Control Skill 的底盘前置条件
+    # 三层互相独立，任何一层没打开车都动不了。
+    #
+    # 覆盖方式：ros2 launch ... allow_motion:=true 或 ros2 run 时用 --ros-args -p
+    allow_motion: false

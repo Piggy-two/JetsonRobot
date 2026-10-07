@@ -9,7 +9,7 @@
 
 ## 1. 一句话状态
 
-**项目处于 Phase 0 硬件验收阶段：设计文档与工程维护机制已建立、磁盘阻塞已解除，仍无业务代码。2026-09-28 完成两轮硬件验收 —— 第一轮为全量接口侦察（四个 USB 口逐口识别、LiDAR 型号实测确认为 LD19、相机定性为单目，决策 D-017 / D-018）；第二轮修掉 LiDAR 的 udev 错配并重启厂商栈验证，`/scan` **实测通过**（10.00 Hz、360°、`frame_id=lidar_frame`、TF `base_link→lidar_frame` 已存在），相机按 D-019 切到厂商 `usb_cam` 分支后 `/depth_cam/rgb0/image_raw` 已出图。2026-10-05 在人工看护下完成**底盘运动验收**（决策 D-020）—— 前进/后退/左移/右移/左转/右转六向方向全部正确、轮速与运动学数值逐位吻合、`/cmd_vel` 厂商限幅（±0.2 m/s / ±0.5 rad/s）实测生效、IMU 独立佐证原地旋转为真实运动，**底盘运动链路通过**。同轮发现**底盘无指令超时保护**（停止发布后电机保持最后速度），已立为安全约束 D-020。同日第二轮做了**通信中断模拟（S2 冻结桥节点 + S3 USB 真断线）**：用**独立于桥节点的 LiDAR 转速计**测得「指令断裂期间机器人仍以 0.1373 rad/s 旋转 = 正常指令的 105%」，把「必须显式发 0」从推断升级为**直接读数**；并测得断线后 **`/odom` 照常发布 28.5 Hz 而 `imu_raw`/`battery` 停发**、**重新 bind 不自恢复（必须重启厂商栈）**、桥节点三次实测三种行为，另确认**本机没有物理急停**。以上立为 **D-021**。**同日第三轮完成相机与语音盒的硬件验收（决策 D-022）**：相机**内容端到端延迟仅约一帧（20~45 ms，用 `v4l2` 的 `brightness` 当"传感器端打光"探针实测）**，但图像 **`header.stamp` 比真实采集时刻早 0.72 s**（稳态 −741 ms、抖动仅 12 ms；已逐条排除订阅队列积压 / 仿真时钟 / 冻结的时钟换算基准 / 双发布者 / USB 带宽 / 设备档位六种解释，**机制未定**），且 **22.6 Hz 确认是主机侧丢帧**（设备在 640×480 YUYV 下**只有 30/25/20/15/10/5 六档**）；语音盒**控制串口 / 录音 / 播放三项全部实测通过**（用户确认听到提示音），`/dev/ring_mic` 缺失的根因是一条**过期 udev 路径**（规则写 `1-2.3.1`，实际设备在 `1-2.4.1`），修正后厂商 ASR 栈**正常启动**。Phase 0 现在只剩**急停链路**（需物理操作）与**相机 TF 帧收口**（#16，须在 Overlay 做）—— 但**「必须显式发 0 才停车」+「存活判据只能用 imu/battery」+「没有物理急停」+「图像时间戳不可信」这四条已彻底改变 Safety 与感知的设计前提**。**同日第四轮建起 Overlay Workspace（`embodied_agent_ws`，建在仓库内）并落地本项目第一个业务代码节点 `embodied_camera_driver`（决策 D-023）**：在同一个 Driver 内收口两项相机软件欠账 —— #23 **重新打时间戳**（三档策略，默认 `receipt − 45 ms`）与 #16 **补发 TF `camera_link0 → camera`**；并**独立复核**了第三轮的结论（时间戳陈旧量均值 **736 ms** / 最大 747 ms，与第三轮亮度探针的 −741 ms **相互印证**；输出帧率 **20.7 → 20.9 Hz ≈ 1:1**；TF `base_footprint → base_link → camera_link0 → camera` **端到端可解析**）。**项目自此不再是「只有文档、没有业务代码」。** 为此把仓库根那份厂商源码副本由 `src/src/` 改名为 `vendor_reference/`，并修掉 `.gitignore` 里一条会**静默吞掉工作区源码**的裸 `src/` 规则（详见 `docs/DEV_NOTES.md`）。**2026-10-06 第五轮收掉相机 Driver 的时间戳尾巴**：`pipeline_latency` 由「估计的一帧 45 ms」实测标定为 **110 ms**（方法：多次事件 + 随机相位，见 §7），并把 D-022 里列为"**已排除**"的『启动时冻结的时钟换算基准』**重新坐实** —— 厂商 `usb_cam` 的时间戳陈旧量**不是恒定的 0.72 s**，它随开机时的时钟跳变而变，**本轮实测 338 565 ms**；成因是本机**每次开机**都会由 timesyncd 从「上次记录的陈旧时间」恢复时钟、随后 NTP 再往前拨（本次约 339 s），而 `usb_cam` 在两次之间启动并冻结了换算基准。**影响面已查清：只有 `usb_cam` 一个节点**（`/scan` −12 ms、`/odom` −12~15 ms、`/tf` −57 ms 全部正常）。最麻烦的一件事其实早就做对了：**`corrected` 策略只用本节点自己的实时钟，与厂商戳机制完全无关**。**2026-10-06 第六轮把 #16 也收干净了**：相机 TF 朝向经实机校验通过（运动质心 513 次检出**全在画面右侧、0 次在左**，地面在光心下方）—— **`camera_link0 → camera` 的 REP-103 光学约定确认无误，参数无需修正**。**至此 D-023 的两项收口（#23 时间戳 / #16 TF）全部闭合，相机 Driver 无遗留项。** **2026-10-06 第七轮开始做语音软件侧验收，没做完，但结果比预想严重**：麦克风**确认可用**（声学回路实测：播 440 Hz，录音里该分量涨三个数量级），整条语音链路也查清是**全本地、不经云端不经 LLM**（唤醒在环形麦硬件上做、识别走讯飞**离线** SDK + 本地 BNF 语法），**安全词「停下」/「stop」就在词表里** —— **但「唤醒」这一环实测不通**：人声说唤醒词零事件，我又**用本地 TTS 合成四个候选唤醒词贴脸播放，同样零事件**，故不是"人说得不对"（**#25**）。同时源码级查出**执行侧的重大缺陷**：「停下」在命令词表里却**没有对应的处理分支**——现在能停**纯粹是掉进默认的零 Twist 分支碰巧成立的**；且该节点发布的是**无限幅**的 `/controller/cmd_vel`、角速度 0.8 rad/s 超过我们限幅（**#26**）。**教训是文档层面的**：此前把"厂商 ASR 栈正常启动"当成了"语音硬件已通过"，**而唤醒从来没被测过**。**2026-10-07 现场清掉 LiDAR 的最后一个悬案**：D-028 留下的「67% 回波在 0.6 m 以内、成因未定」，换摆位后跌到 **3.6%**、贴身环**完全消失** → 判为**外部环境、非自身结构**（新增工装 `tools/lidar_environment_probe.py`；判据是"回波跟不跟着车走"而不是"距离多近"）。**不需要做自身结构回波掩膜**；但**避障阈值必须按部署环境实测**（同一台车两次摆位，近场占比 3.6% ↔ 67%）。**Phase 0 软件侧仍只剩语音唤醒（#25），硬件侧只剩急停链路（#22，用户已暂缓）**；顺带修掉新工装自身一个墙上钟被 NTP 步进污染的 bug（坑 13）。**同日第二件事：把语音「唤醒不通」的根因查到了底（#25）** —— 不在发音、不在解析，在**更上游**：`mic_init.launch.py` 的 `enable_setting` **默认 `false`**，而 `awake_node.py` 只在它为真时才调 `switch_mic()` / `set_wakeup_word()`，**所以唤醒词从来没写进硬件**；把它强制打开，节点**卡死在 `switch_mic` 的握手等待**（`while True` 无超时）；**直接探测那条控制串口，收到 0 字节**（4 种 RTS/DTR 组合 + 180 s 纯监听 + 90 次握手补发）—— ⚠️ **零字节 ≠ 波特率不对**（波特率错会收到乱码），说明该线**收方向没有电平活动**；而 `awake_node` 的唤醒线程读的**就是这条线** ⇒ **唤醒在结构上不可能产生**。**音频侧证实是活的**（3 s 采集峰值 6.4% FS）。**同时更正三条文档错误**：`/awake_node/init_finish` 是**无条件创建**的、不能当握手成功的证据；卡点不在解析/发音；"ASR 栈正常启动"只证明节点起得来。**⚠️ 影响面**：Safety Runtime 的本地安全指令通路订阅 `/asr_node/voice_words` ⇒ **语音急停词当前不可用**（`~/estop` 正常）。**语音功能用户已决定暂缓测试**（现场不便说话）；**电机真机运动测试用户也已决定暂缓**（判断后续开发用不上）。
+**项目处于 Phase 0 硬件验收阶段：设计文档与工程维护机制已建立、磁盘阻塞已解除，仍无业务代码。2026-09-28 完成两轮硬件验收 —— 第一轮为全量接口侦察（四个 USB 口逐口识别、LiDAR 型号实测确认为 LD19、相机定性为单目，决策 D-017 / D-018）；第二轮修掉 LiDAR 的 udev 错配并重启厂商栈验证，`/scan` **实测通过**（10.00 Hz、360°、`frame_id=lidar_frame`、TF `base_link→lidar_frame` 已存在），相机按 D-019 切到厂商 `usb_cam` 分支后 `/depth_cam/rgb0/image_raw` 已出图。2026-10-05 在人工看护下完成**底盘运动验收**（决策 D-020）—— 前进/后退/左移/右移/左转/右转六向方向全部正确、轮速与运动学数值逐位吻合、`/cmd_vel` 厂商限幅（±0.2 m/s / ±0.5 rad/s）实测生效、IMU 独立佐证原地旋转为真实运动，**底盘运动链路通过**。同轮发现**底盘无指令超时保护**（停止发布后电机保持最后速度），已立为安全约束 D-020。同日第二轮做了**通信中断模拟（S2 冻结桥节点 + S3 USB 真断线）**：用**独立于桥节点的 LiDAR 转速计**测得「指令断裂期间机器人仍以 0.1373 rad/s 旋转 = 正常指令的 105%」，把「必须显式发 0」从推断升级为**直接读数**；并测得断线后 **`/odom` 照常发布 28.5 Hz 而 `imu_raw`/`battery` 停发**、**重新 bind 不自恢复（必须重启厂商栈）**、桥节点三次实测三种行为，另确认**本机没有物理急停**。以上立为 **D-021**。**同日第三轮完成相机与语音盒的硬件验收（决策 D-022）**：相机**内容端到端延迟仅约一帧（20~45 ms，用 `v4l2` 的 `brightness` 当"传感器端打光"探针实测）**，但图像 **`header.stamp` 比真实采集时刻早 0.72 s**（稳态 −741 ms、抖动仅 12 ms；已逐条排除订阅队列积压 / 仿真时钟 / 冻结的时钟换算基准 / 双发布者 / USB 带宽 / 设备档位六种解释，**机制未定**），且 **22.6 Hz 确认是主机侧丢帧**（设备在 640×480 YUYV 下**只有 30/25/20/15/10/5 六档**）；语音盒**控制串口 / 录音 / 播放三项全部实测通过**（用户确认听到提示音），`/dev/ring_mic` 缺失的根因是一条**过期 udev 路径**（规则写 `1-2.3.1`，实际设备在 `1-2.4.1`），修正后厂商 ASR 栈**正常启动**。Phase 0 现在只剩**急停链路**（需物理操作）与**相机 TF 帧收口**（#16，须在 Overlay 做）—— 但**「必须显式发 0 才停车」+「存活判据只能用 imu/battery」+「没有物理急停」+「图像时间戳不可信」这四条已彻底改变 Safety 与感知的设计前提**。**同日第四轮建起 Overlay Workspace（`embodied_agent_ws`，建在仓库内）并落地本项目第一个业务代码节点 `embodied_camera_driver`（决策 D-023）**：在同一个 Driver 内收口两项相机软件欠账 —— #23 **重新打时间戳**（三档策略，默认 `receipt − 45 ms`）与 #16 **补发 TF `camera_link0 → camera`**；并**独立复核**了第三轮的结论（时间戳陈旧量均值 **736 ms** / 最大 747 ms，与第三轮亮度探针的 −741 ms **相互印证**；输出帧率 **20.7 → 20.9 Hz ≈ 1:1**；TF `base_footprint → base_link → camera_link0 → camera` **端到端可解析**）。**项目自此不再是「只有文档、没有业务代码」。** 为此把仓库根那份厂商源码副本由 `src/src/` 改名为 `vendor_reference/`，并修掉 `.gitignore` 里一条会**静默吞掉工作区源码**的裸 `src/` 规则（详见 `docs/DEV_NOTES.md`）。**2026-10-06 第五轮收掉相机 Driver 的时间戳尾巴**：`pipeline_latency` 由「估计的一帧 45 ms」实测标定为 **110 ms**（方法：多次事件 + 随机相位，见 §7），并把 D-022 里列为"**已排除**"的『启动时冻结的时钟换算基准』**重新坐实** —— 厂商 `usb_cam` 的时间戳陈旧量**不是恒定的 0.72 s**，它随开机时的时钟跳变而变，**本轮实测 338 565 ms**；成因是本机**每次开机**都会由 timesyncd 从「上次记录的陈旧时间」恢复时钟、随后 NTP 再往前拨（本次约 339 s），而 `usb_cam` 在两次之间启动并冻结了换算基准。**影响面已查清：只有 `usb_cam` 一个节点**（`/scan` −12 ms、`/odom` −12~15 ms、`/tf` −57 ms 全部正常）。最麻烦的一件事其实早就做对了：**`corrected` 策略只用本节点自己的实时钟，与厂商戳机制完全无关**。**2026-10-06 第六轮把 #16 也收干净了**：相机 TF 朝向经实机校验通过（运动质心 513 次检出**全在画面右侧、0 次在左**，地面在光心下方）—— **`camera_link0 → camera` 的 REP-103 光学约定确认无误，参数无需修正**。**至此 D-023 的两项收口（#23 时间戳 / #16 TF）全部闭合，相机 Driver 无遗留项。** **2026-10-06 第七轮开始做语音软件侧验收，没做完，但结果比预想严重**：麦克风**确认可用**（声学回路实测：播 440 Hz，录音里该分量涨三个数量级），整条语音链路也查清是**全本地、不经云端不经 LLM**（唤醒在环形麦硬件上做、识别走讯飞**离线** SDK + 本地 BNF 语法），**安全词「停下」/「stop」就在词表里** —— **但「唤醒」这一环实测不通**：人声说唤醒词零事件，我又**用本地 TTS 合成四个候选唤醒词贴脸播放，同样零事件**，故不是"人说得不对"（**#25**）。同时源码级查出**执行侧的重大缺陷**：「停下」在命令词表里却**没有对应的处理分支**——现在能停**纯粹是掉进默认的零 Twist 分支碰巧成立的**；且该节点发布的是**无限幅**的 `/controller/cmd_vel`、角速度 0.8 rad/s 超过我们限幅（**#26**）。**教训是文档层面的**：此前把"厂商 ASR 栈正常启动"当成了"语音硬件已通过"，**而唤醒从来没被测过**。**2026-10-07 现场清掉 LiDAR 的最后一个悬案**：D-028 留下的「67% 回波在 0.6 m 以内、成因未定」，换摆位后跌到 **3.6%**、贴身环**完全消失** → 判为**外部环境、非自身结构**（新增工装 `tools/lidar_environment_probe.py`；判据是"回波跟不跟着车走"而不是"距离多近"）。**不需要做自身结构回波掩膜**；但**避障阈值必须按部署环境实测**（同一台车两次摆位，近场占比 3.6% ↔ 67%）。**Phase 0 软件侧仍只剩语音唤醒（#25），硬件侧只剩急停链路（#22，用户已暂缓）**；顺带修掉新工装自身一个墙上钟被 NTP 步进污染的 bug（坑 13）。**同日第二件事：把语音「唤醒不通」的根因查到了底（#25）** —— 不在发音、不在解析，在**更上游**：`mic_init.launch.py` 的 `enable_setting` **默认 `false`**，而 `awake_node.py` 只在它为真时才调 `switch_mic()` / `set_wakeup_word()`，**所以唤醒词从来没写进硬件**；把它强制打开，节点**卡死在 `switch_mic` 的握手等待**（`while True` 无超时）；**直接探测那条控制串口，收到 0 字节**（4 种 RTS/DTR 组合 + 180 s 纯监听 + 90 次握手补发）—— ⚠️ **零字节 ≠ 波特率不对**（波特率错会收到乱码），说明该线**收方向没有电平活动**；而 `awake_node` 的唤醒线程读的**就是这条线** ⇒ **唤醒在结构上不可能产生**。**音频侧证实是活的**（3 s 采集峰值 6.4% FS）。**同时更正三条文档错误**：`/awake_node/init_finish` 是**无条件创建**的、不能当握手成功的证据；卡点不在解析/发音；"ASR 栈正常启动"只证明节点起得来。**⚠️ 影响面**：Safety Runtime 的本地安全指令通路订阅 `/asr_node/voice_words` ⇒ **语音急停词当前不可用**（`~/estop` 正常）。**语音功能用户已决定暂缓测试**（现场不便说话）；**电机真机运动测试用户也已决定暂缓**（判断后续开发用不上）。**同日第三轮：架构里第一次有了「Agent 那一侧」** —— 用户要求"尽可能完善上层"，**分两批**交付，第一批落地 **`embodied_skill_gateway`（D-005 六项检查 + 数据驱动注册表 + 8 状态机）** 与 **`embodied_command_router`（D-006 三分类 + 中文命令解析）**，**离线单测 143 项 + 端到端 dry-run 16/16 全过**（∫vx **+0.5025 m** / 请求 0.5；被拒请求下游速度**恒为 0**；全程 `/cmd_vel` 发布者只有 Safety Runtime 一条）。新增 **D-029 ~ D-033** 五条决策，其中 **D-030 填掉了 `DECISIONS.md` 里唯一被点名"仍待定"的那一格**（Agent ↔ Skill Manager 的 IPC 形式），并修正了 **D-003 的措辞**（"Semantic Skill" → "task-tier"）与 **`ARCHITECTURE.md` §5.1 的控制流**（Registry 从"一个并列的跳"改成"Gateway 查的数据"）。**网关刻意做成不是转发器**：它能拒绝底层技能会接受的东西（`agent.planner` 无权调 control 技能 / 0.8 m 超策略上限 / 把开环 `success` 标成 `verified=false` 且不产出 `ARRIVED`），三条都有回归测试与活体实测。⚠️ **但车全程没动** —— 这一批进「未经验证的代码」清单。**两批的分界**：第一批刻意只做"能验完的"，把"未验证代码进控制环"的风险挡在第二批之外。
 
 ---
 
@@ -69,6 +69,15 @@
   （不依赖 Motor Driver 存活）。⚠️ 按 plan.md 属 Phase 6，**提前开始**，因为 #22「本机没有物理急停」
   这条约束今天就压着。**已含**对 Motor Driver 的停更看门狗（它挂了自动接管发零，且未恢复时拒绝解除）；
   **不含**避障 / 限速 / Agent 侧 Skill 网关。
+- **上层第一批已落地**（2026-10-07，**D-029 ~ D-033**）—— 架构里第一次有了"Agent 那一侧"：
+  - **`embodied_skill_gateway`**：D-005 六项检查的落点。注册表是**数据**（`config/skill_registry.yaml`），
+    🔒 **唯一被允许直接调用技能服务的进程**。刻意**不是转发器** —— 判据是"必须能拒绝某些
+    底层技能会接受的东西"，三类非透传行为（权限 / 更严的范围 / 语义改写）各有回归测试与活体实测。
+  - **`embodied_command_router`**：D-006 的三分类（安全词 / 确定性命令 / 复杂任务）。
+    复杂任务**明确拒绝**（需要 Agent 规划，Phase 7）；解析歧义**拒绝而不猜**
+    （`左转 3` 按度与按弧度差 57 倍）。安全词判定**复用** `estop.py` 的整句匹配。
+  - ⚠️ **两批交付**：第二批是 `embodied_agent_runtime`（Executor / Event / Memory / Planner stub）
+    与 `embodied_autonomous_skills`（骨架；`navigate_to` 因本机无 SLAM 明确拒绝）。
 - **LiDAR Primitive 已落地**（**D-028**）—— 提供"某方向、某距离内有没有东西"的查询原语
   （而不是转发点云）。✅ **2026-10-07 判明**：原「67% 回波在 0.6 m 以内」的**环境条件**，
   换摆位后跌到 **3.6%**、那圈 0.10~0.28 m 贴身回波**完全消失** → **是外部环境，不是自身结构**
@@ -122,6 +131,17 @@
 
 **优先级从高到低：**
 
+0. **上层第二批**（用户指定的下一件事，2026-10-07）—— 第一批（Skill 网关 + 命令路由器）已验完，
+   第二批按同样口径推进：
+   - `embodied_agent_runtime`：**Executor / Event Manager / Memory / Planner(stub)** ——
+     消费第一批已落地的 `SkillEvent` 事件；`WAIT` 用**纯逻辑推进、不阻塞**（D-030 决策 2）。
+     状态机的 canonical 模块放**网关**（`task_state.py`），Agent Runtime 从它 import ——
+     这样可以保证**事件只有网关一个发布者**。
+   - `embodied_autonomous_skills`：接口与状态机骨架；`navigate_to` 因**本机没有 SLAM/导航栈**
+     需明确拒绝；若做反应式技能（如组合 LiDAR `path_clear` + `move_relative`），
+     **一律标注"真机未验证"**并挂 `allow_motion` 闸门（D-033）。
+   - ⚠️ 复杂任务分支（`Agent Task`）**继续保持明确拒绝**，直到 Phase 7 有 LLM 规划器 ——
+     这是用户 2026-10-07 的明确选择。
 1. ~~建立 Overlay Workspace（`embodied_agent_ws`）~~ ✅ **2026-10-05 已完成** —— 建在**仓库内**，已落地首个业务代码节点 `embodied_camera_driver`（D-023）。Phase 1 的 Driver 层、#16 的 TF 补救、#23 的重新打时间戳、#17 的相机 udev 规则，今后都落在这里（**不得修改厂商 `~/ros2_ws`**，CLAUDE.md §2/§8）。
    - ~~遗留两个一次性小动作~~ ✅ **两个都已完成**：① ~~实机目视校验 TF 朝向~~ ✅ 2026-10-06 通过；② ~~校准 `pipeline_latency`~~ ✅ 45 ms → **110 ms**（方法见 §7）。
    - ✅ **2026-10-06：Phase 1 第二个 Driver `embodied_motor_driver` 已落地**（**D-025**，干跑验证通过、14 项离线单测全过）。**它的下一步**：
@@ -168,6 +188,8 @@
 | **Control Skill**（Overlay） | ✅ `embodied_control_skills` + `embodied_skills_interfaces`（Control Skill 层，**D-026**） | `ros2 launch embodied_control_skills control_skills.launch.py`（**前置：Motor Driver 必须已在跑**，否则一律拒绝运动） | ✅ 服务 `~/move_relative`（`embodied_skills_interfaces/MoveRelative`：**机体坐标系** x 前 / y 左，单位米）、`~/rotate`（`Rotate`：弧度，**逆时针为正**）、`~/stop`（`std_srvs/Trigger`，**立即中止、不等待**） | ✅ `/embodied/motor/cmd_vel`（→ Motor Driver）。**空闲时不发** —— 持续发零是 Motor Driver 的职责（D-025） | 无 TF 职责 | 🟡 **干跑验证 16/16 项通过**（2026-10-06，**19 项单测** + 速度积分实测）；⚠️ **真机运动未测**；⚠️ **开环**：`success` ≠ 走到位 |
 | **Safety Runtime**（Overlay） | ✅ `embodied_safety_runtime`（**D-027**，按 plan.md 属 Phase 6，**提前开始**） | `ros2 launch embodied_safety_runtime safety_runtime.launch.py` | ✅ `/asr_node/voice_words`（**厂商离线 ASR 的文本**；本地匹配安全词） | 🔒 `/cmd_vel`（**独立零速通道**，锁存期间 @10 Hz 发零；**唯一的发布语句就是 `publish(Twist())`，只会发零**）+ `/embodied/safety/status`（`Float64MultiArray` = `[是否锁存, 已发零帧数, 触发次数]`）+ `/embodied/safety/events`（`String`：`estop_triggered:<原因>` / `estop_released`）+ 服务 `~/estop` / `~/release`（`std_srvs/Trigger`，**锁存，必须显式解除**） | 无 TF 职责 | 🟢 **离线 + 实测 14/14 通过**（2026-10-06，**45 项单测**；**全程 Motor Driver 未启动**，证明零速通道独立）；**看门狗实测 12/12 通过**（Motor Driver 停更即自动接管，且未恢复时拒绝解除）；⚠️ **本版不含**避障 / 限速 |
 | **LiDAR Primitive**（Overlay） | ✅ `embodied_lidar_driver`（Driver/Primitive 层，**D-028**；⚠️ **不做收口** —— 厂商 `/scan` 本身是对的） | `ros2 launch embodied_lidar_driver lidar_driver.launch.py`（**前置：厂商雷达节点已在跑**） | ✅ `/scan`（`sensor_msgs/LaserScan`，**只读**） | ✅ `/embodied/lidar/front`（`Float64MultiArray` = `[最近距离m, 角度rad, 是否有效, 扇区内有效点数]`，无回波时距离 = −1；**实测 9.999 Hz**）+ 服务 `~/sector_min_range`（`embodied_skills_interfaces/SectorMinRange`）、`~/path_clear`（`PathClear`） | 无 TF 职责（用 `/scan` 已有的 `lidar_frame`） | 🟢 **已通过**（2026-10-06，**30 项单测** + 对**真实雷达**独立重算交叉验证 **逐位一致**）；✅ 2026-10-07：原「近场回波成因未定」**已判明为外部环境**（非自身结构，不需掩膜）；🔴 **避障阈值须按部署环境实测**（见 §7） |
+| **Skill 网关**（Overlay） | ✅ `embodied_skill_gateway`（**D-029/D-030/D-031/D-032**，D-005 的落点） | `ros2 launch embodied_skill_gateway skill_gateway.launch.py`（**默认 `allow_motion:=false`**；要派发控制类技能须显式打开） | ✅ 服务 `~/invoke`（`SkillInvoke`：**通用信封** `principal` / `skill` / `args_json` / `request_id`）、`~/cancel`（`SkillCancel`）、`~/get_result`（`SkillResult`）、`~/list`（`SkillList`，**只读投影，不含底层 ROS 服务名**） | ✅ `/embodied/skill/events`（`SkillEvent`：`task_id` / `skill` / `state` / `detail` / `progress`（开环恒 **−1**）/ `verified`（**恒 false**）/ `stamp`）。**发布者只有本节点一个** | 无 TF 职责 | 🟡 **离线 91 项单测 + dry-run 集成通过**（2026-10-07）；⚠️ **真机未验证**。反代理三性质有回归测试 + 活体实测：`agent.planner` 调 control 技能 → `REJECTED: 无权调用`；0.8 m → `REJECTED: 超过策略上限 0.5m`（底层 1.0 m 会接受）；control-tier 终态恒 `verified=false` 且不产出 `ARRIVED` |
+| **命令路由器**（Overlay） | ✅ `embodied_command_router`（**D-006**） | `ros2 launch embodied_command_router command_router.launch.py`（**默认 `allow_motion:=false`**；**前置：Skill Gateway 必须在跑**） | ✅ `/embodied/command/text`（`std_msgs/String`，**可 `x:=` 指向 `/asr_node/voice_words`** —— 语音修好后不用改代码） | → `/skill_gateway/invoke`（确定性命令，principal = `router.deterministic`）、`/safety_runtime/estop`（安全词） | 无 TF 职责 | 🟡 **离线 52 项单测 + dry-run 集成通过**（2026-10-07）；⚠️ **真机未验证**；⚠️ **只吃文本**（语音链路是死的，#25）。解析拒绝而不猜：缺单位 / 未知单位 / 方向不唯一 / 数值与单位不紧邻，一律拒绝 |
 | 语音 | ✅ `xf_mic_asr_offline`（`awake_node.py` / `asr_node.py` / `voice_control`，修正 udev 后实测可正常启动） | `ros2 launch xf_mic_asr_offline mic_init.launch.py`（`MIC_TYPE=xf` 设在 `~/.zshrc`） | `/dev/ring_mic` → `ttyCH341USB1`（Hub 口 `1-2.4.1`，控制串口）+ 声卡 0（`1-2.4.2`，48 kHz S16_LE 2ch 采集） | ASR 文本 / 唤醒事件（**唤醒实测不通**，见 #25）；播放已实测 | `MIC_TYPE=xf`；`ASR_MODE=online`（⚠️ **该变量只被厂商 `large_models` 读取，麦克风栈不读它** —— 见 **#27**，故**不再是"断网不可用"的理由**） | ⚠️ **音频硬件通过，但链路不可用**（2026-10-05 D-022 三项硬件；2026-10-06 第七轮唤醒不通；**2026-10-07 根因定位：控制串口完全沉默**，#25）。🔊 **播放音量**：`Speaker` 由 **91%（−5.82 dB）调到 77%（−14.50 dB）**（2026-10-07，用户确认可听清；**运行时设置，未持久化** —— 重启会回到 91%） |
 | 导航 | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ 未测 |
 
@@ -503,12 +525,41 @@ voice_control_move ──→ /controller/cmd_vel（⚠️ 无限幅那条，见 
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | ⬜ 未开始 |
 | Phase 4 | Semantic Skills（`search_object` / `inspect_area` / `patrol_route` / `return_home`） | ⬜ 未开始 |
 | Phase 5 | Voice System（Wake Word / VAD / ASR / TTS） | ⬜ 未开始 |
-| Phase 6 | Agent Runtime（Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway） | 🚧 **Safety 部分提前开始**（**D-027**，2026-10-06：`embodied_safety_runtime` 第一版——本地安全指令通路 + 独立零速通道）。**理由**：D-006 的要求**在当下就成立**（本机没有物理急停，#22），不必等 Agent 层建好。其余（Planner / Executor / Skill Registry / Memory）未开始 |
+| Phase 6 | Agent Runtime（Planner / Executor / Skill Registry / Event Manager / Memory / Safety Gateway） | 🚧 **已有三块落地**：**D-027**（2026-10-06，`embodied_safety_runtime`：本地安全指令通路 + 独立零速通道）、**D-029~D-032**（2026-10-07，`embodied_skill_gateway`：**Skill Registry + Safety Gateway + 状态机** 与 `embodied_command_router`）。**理由**：D-005/D-006 的要求**在当下就成立**（本机没有物理急停 #22），不必等 Agent 层建好。**其余（Planner / Executor / Event Manager / Memory）未开始 —— 属第二批** |
 | Phase 7 | Hybrid LLM（Rule Engine + Cloud LLM + 预留 Local Small LLM） | ⬜ 未开始 |
 
 ---
 
-## 9. 新会话恢复检查清单
+## 9. 未经验证的代码（诚实清单）
+
+> 用户明确要求：**轮不到真机验证的代码可以写，但必须显式标注**（**D-033**）。
+>
+> 三级口径 —— 只有 **(c)** 才进本清单：
+> **(a) 离线单测通过** ｜ **(b) dry-run 集成通过**（链路跑通、数值对得上，但**车没动**）｜
+> **(c) 真机未验证**
+>
+> 源码里的标注约定：`# UNVERIFIED(real-motion): ...`。
+> 以及**三层互相独立的闸门**（默认全关，任一层没打开车都动不了）：
+> ① 上层节点的 `allow_motion`（默认 false）② Motor Driver 的 `dry_run`（默认 true）
+> ③ Control Skill 的底盘前置条件。
+
+| 代码 | (a) 离线单测 | (b) dry-run 集成 | (c) 真机 | 说明 |
+|---|---|---|---|---|
+| `embodied_command_router` | ✅ 52 项 | ✅ 见第三轮验收 | ⚠️ **未验证** | 只吃文本（语音链路是死的，#25） |
+| `embodied_skill_gateway` | ✅ 91 项 | ✅ 见第三轮验收 | ⚠️ **未验证** | 派发路径的数值对得上，但**车没动过** |
+| `embodied_control_skills` | ✅ 19 项 | ✅ 速度积分 16/16 | ⚠️ **未验证** | 开环；`success` ≠ 走到位（D-026） |
+| `embodied_motor_driver` | ✅ 21 项 | ✅ 假遥测 + 干跑 | ⚠️ **未验证** | `dry_run:=false` 从未在真机上跑过 |
+| `embodied_lidar_driver` | ✅ 30 项 | ✅ 对真实雷达交叉验证 | ✅ **通过** | 只读，不驱动任何执行器 |
+| `embodied_safety_runtime` | ✅ 45 项 | ✅ 离线实测 14/14 + 看门狗 12/12 | ⚠️ 零速通道的**物理效果**未验证 | 结构上只发零（D-027） |
+| `embodied_camera_driver` | — | ✅ 实机 | ✅ **通过** | 只读相机 |
+
+> ⚠️ **一句话**：**"会不会走到那个位置"这件事，全项目至今没有任何一行代码被真机验证过。**
+> 被验证的是**链路与数值**（速度发出来了、积分对得上、被拒的没发出去），
+> 而 Motor Driver 的 `dry_run:=false` 从未在真机上执行过。
+
+---
+
+## 10. 新会话恢复检查清单
 
 ```bash
 # 1. 读文档
