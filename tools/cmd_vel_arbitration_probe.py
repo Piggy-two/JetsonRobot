@@ -22,13 +22,26 @@ Motor Driver 默认 `dry_run=true`：它**不向 `/cmd_vel` 发布任何东西**
 
 两种工况（`--stop-service`）
 ----------------------------
-    --stop-service /motor_driver/stop      # 现状：Safety 会顺带调下游锁存
-    --stop-service /acceptance/absent      # 危险情形：下游 `stop` **调不通**
-                                            #（Motor Driver 还活着、还在转发指令）
+    --stop-service /motor_driver/stop      # 下游 `stop` 调得通
+    --stop-service /acceptance/absent      # 下游 `stop` **调不通**（危险情形：
+                                            # Motor Driver 还活着、还在转发指令）
+
+⚠️ **D-037 之后这两档都应该是 0%** —— 那正是这个工装存在的意义
+--------------------------------------------------------------
+D-037 把否决权改成了**结构性**的：Motor Driver 直接读 `/embodied/safety/status`，
+安全层锁存期间它**自己**输出零，不再依赖"下游 `stop` 这次调通没有"。
+
+| 工况 | 修复前（2026-10-07 上半天） | **修复后** |
+|---|---|---|
+| 下游 `stop` 调得通 | 锁存后 **0% 非零** | 锁存后 **0% 非零**（不变） |
+| 下游 `stop` **调不通** | 锁存后 **66% 非零**（= 速率比），**不衰减** | 锁存后 **0% 非零** ← **这一格就是修复的证据** |
+
+⇒ **跑这两档必须都得到 0%**。哪一档不是 0%，就说明否决权又退回"咨询性"了。
 
 用法
 ----
-    ① 起 Motor Driver（**默认 dry_run，不要加 dry_run:=false**）：
+    ① 起 Motor Driver（**默认 dry_run，不要加 dry_run:=false**；
+       默认 `require_safety:=true` 正是被验的那条路径，不要关）：
          ros2 launch embodied_motor_driver motor_driver.launch.py
 
     ② 起 Safety Runtime，零速通道指到干跑话题、避障守卫关掉（本工装只问仲裁）：
@@ -40,6 +53,11 @@ Motor Driver 默认 `dry_run=true`：它**不向 `/cmd_vel` 发布任何东西**
     ③ 跑：
          python3 tools/cmd_vel_arbitration_probe.py
          python3 tools/cmd_vel_arbitration_probe.py --stop-service /acceptance/absent
+
+⚠️ **两次运行之间要显式 `~/resume`**：D-037 之后，只要"被拦下那一刻底盘可能还在动"，
+   Motor Driver 恢复后会置位「需重新使能」——**这是刻意的**（不许静默复动），
+   但会让第二次运行的前置基线变成 0% 非零，看起来像"没在转发"。
+   工装会打印 `⚠️ 一直没等到非零帧`，先 `ros2 service call /motor_driver/resume` 再跑。
 
 退出码：0 = 测出来了；1 = 前置条件不满足（拒测）。
 """
@@ -229,12 +247,12 @@ def main():
     print('=' * 72)
     print(f'  · 锁存前非零 {pct_pre:.0f}% 是基线（只有 Motor Driver 在发指令）。')
     print(f'  · 锁存后非零 {pct_post:.0f}%：')
-    print('      ≈ 0  → 两路都在发零，**这条路上停住了**；')
-    print('      > 0   → **零与非零在交替**，说明"Safety 发零"单独并不构成停车，')
-    print('              真正让车停住的是下游那个 stop 是否调得通。')
+    print('      = 0  → **这条路上停住了**（D-037 之后两档都该是 0）；')
+    print('      > 0  → **零与非零在交替**，否决权退回"咨询性"了 —— 说明它又在依赖')
+    print('              "下游 stop 这次调通没有"，而不是在读安全层的状态。')
     if args.stop_service != '/motor_driver/stop':
         print(f'  · 本次 `--stop-service {args.stop_service}` 是**故意调不通**的 ——')
-        print('    这一档就是"Motor Driver 还活着、还在转发指令，但下游停不下来"的危险情形。')
+        print('    这一档是**修复前唯一会露馅**的那格（当时 66%）；现在它也必须是 0%。')
 
     # 收尾
     node.call(node.release_cli, RELEASE)

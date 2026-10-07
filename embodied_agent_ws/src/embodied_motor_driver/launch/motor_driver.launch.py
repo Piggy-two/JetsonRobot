@@ -22,8 +22,11 @@
 看状态（状态码 / 速度 / 各信号龄）：
     ros2 topic echo /embodied/motor/status
       data = [状态码, vx, vy, wz, 指令龄ms, imu龄ms, battery龄ms,
-              是否锁存, 是否dry_run, 是否需重新使能]
-      状态码 0=ok 1=no_cmd 2=telemetry_lost 3=stopped 4=rearm_required；龄为 -1 表示从未收到
+              是否锁存, 是否dry_run, 是否需重新使能,
+              安全层状态龄ms, 安全层是否锁存, 安全层是否拦着]
+      状态码 0=ok 1=no_cmd 2=telemetry_lost 3=stopped 4=rearm_required 5=safety_blocked
+      龄为 -1 表示从未收到
+      ⚠️ 后三个是 2026-10-07 追加的（D-037），前十个位置不变
 
 看链路事件（只在变化时发）：
     ros2 topic echo /embodied/motor/events
@@ -39,6 +42,19 @@
          恢复后**置位「需重新使能」**，在显式 `~/resume` 之前**即使上层继续发指令也一律输出零**
          —— 防止链路一恢复就"毫无预兆地接着跑"；
       ③ **重启厂商服务需要 root，本节点做不到**，所以真恢复仍须人工介入。
+
+⚠️ **安全层否决（D-037，默认开）**：本节点会读 Safety Runtime 的状态，
+   它锁存期间本节点**自己**输出零 —— 因为 `/cmd_vel` 上有两个并列发布者、**没有仲裁**
+   （#28 / DEV_NOTES 坑 23），"Safety 发零"单独并不构成停车。实测：下游 `stop` 调不通时
+   那条话题上**非零占 66%** 且不衰减。
+
+   ⚠️ **因此本节点现在需要 Safety Runtime 在跑**：它不在（或状态停更 > `safety_timeout`）时，
+   本节点**拒绝运动**（状态码 5 = `safety_blocked`）。本机没有物理急停（#22），
+   安全层不在就不存在否决权。
+
+   台架 / 离线实验（例如只跑本节点看干跑输出）必须显式关掉这道闸：
+
+       ros2 launch embodied_motor_driver motor_driver.launch.py require_safety:=false
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -64,6 +80,17 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'battery_topic', default_value='/ros_robot_controller/battery',
             description='存活判据之二（D-021）。只认这两个，绝不认 /odom'),
+        DeclareLaunchArgument(
+            'require_safety', default_value='true',
+            description='安全层否决（D-037）。true（默认）= 读 Safety Runtime 的状态，'
+                        '它锁存或不在跑时本节点自己输出零。'
+                        '⚠️ 台架 / 离线实验必须显式设 false，否则**车根本不会动**'),
+        DeclareLaunchArgument(
+            'safety_status_topic', default_value='/embodied/safety/status',
+            description='安全层状态话题。测试时可指向假话题以模拟"安全层挂掉"'),
+        DeclareLaunchArgument(
+            'safety_timeout', default_value='1.0',
+            description='安全层状态停更多久即视为"没有安全层"（秒）'),
         Node(
             package='embodied_motor_driver',
             executable='motor_driver',
@@ -73,6 +100,9 @@ def generate_launch_description():
                 'dry_run': LaunchConfiguration('dry_run'),
                 'imu_topic': LaunchConfiguration('imu_topic'),
                 'battery_topic': LaunchConfiguration('battery_topic'),
+                'require_safety': LaunchConfiguration('require_safety'),
+                'safety_status_topic': LaunchConfiguration('safety_status_topic'),
+                'safety_timeout': LaunchConfiguration('safety_timeout'),
             }],
         ),
     ])

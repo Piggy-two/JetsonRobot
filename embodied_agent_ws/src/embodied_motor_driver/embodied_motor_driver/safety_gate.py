@@ -13,12 +13,33 @@
 
 规则（优先级从高到低）：
 
-  1. **锁存停车** —— 一旦被要求停，必须先显式 `resume()` 才能再动。
-  2. **失联后需重新使能** —— 见下面「链路状态机」。
-  3. **底盘存活**（D-021）—— 存活判据**只能用 `imu_raw` / `battery` 的到达时刻**，
+  1. **安全层否决**（D-037）—— 见下面「安全层否决」。
+  2. **锁存停车** —— 一旦被要求停，必须先显式 `resume()` 才能再动。
+  3. **失联后需重新使能** —— 见下面「链路状态机」。
+  4. **底盘存活**（D-021）—— 存活判据**只能用 `imu_raw` / `battery` 的到达时刻**，
      绝不能用 `/odom`（断线时它照发 28.5 Hz）也不能用 `pgrep`。
-  4. **指令超时**（D-020）—— 上层停发指令 ≠ 停车。超过 `cmd_timeout` 未收到新指令即输出零。
-  5. **限幅** —— 发布前再钳一次（纵深防御，`/controller/cmd_vel` 那条**完全没钳**，#19）。
+  5. **指令超时**（D-020）—— 上层停发指令 ≠ 停车。超过 `cmd_timeout` 未收到新指令即输出零。
+  6. **限幅** —— 发布前再钳一次（纵深防御，`/controller/cmd_vel` 那条**完全没钳**，#19）。
+
+**安全层否决（D-037）—— 把否决权从「咨询性」变成「结构性」**
+
+D-036 第七轮实测出的问题：Safety Runtime 锁存时**自己**向 `/cmd_vel` 发零，
+而本节点同时也在发指令 —— 两个**并列发布者、没有仲裁**（`DEV_NOTES` 坑 23 / #28）。
+实测：下游 `stop` **调不通**时，那条话题上**非零占 66%**（= 速率比 `20/(20+10)`）且**不衰减**。
+⇒ 那时"急停"实际上是**抖着走**，**整个否决权押在"一次服务调用能不能调通"上**。
+
+所以本节点改为**直接读安全层的状态**，锁存期间**自己**输出零 ——
+否决不再依赖"谁先谁后"，也**不再依赖任何服务调用是否成功**。
+
+    Safety Runtime ──/embodied/safety/status──→ 本节点（锁存期间自己发零）
+
+⚠️ **安全层不在跑（或状态停更）时，本节点拒绝运动。** 这不是"宁可错杀"：
+   本机**没有物理急停**（#22），安全层就是那个终审 —— 它不在，就不存在否决权。
+   要单独跑本节点做台架实验，必须显式 `require_safety=False`。
+
+**进入受限状态时若"底盘可能还在动"，恢复后同样要求显式 `resume()`** ——
+与链路失联一条理由（D-025）：上层可能一直在以 20 Hz 发同一条指令，
+安全层一回来那条指令立刻生效，机器人会**毫无预兆地接着跑**。
 
 **链路状态机（startup / alive / lost）与「失联后需重新使能」**
 
@@ -62,6 +83,7 @@ class MotorSafetyGate:
     STATE_TELEMETRY_LOST = 'telemetry_lost'
     STATE_STOPPED = 'stopped'
     STATE_REARM_REQUIRED = 'rearm_required'
+    STATE_SAFETY_BLOCKED = 'safety_blocked'
 
     STATE_CODES = {
         STATE_OK: 0.0,
@@ -69,15 +91,20 @@ class MotorSafetyGate:
         STATE_TELEMETRY_LOST: 2.0,
         STATE_STOPPED: 3.0,
         STATE_REARM_REQUIRED: 4.0,
+        STATE_SAFETY_BLOCKED: 5.0,
     }
 
     def __init__(self, max_vx=0.2, max_vy=0.2, max_wz=0.5,
-                 cmd_timeout=0.5, telemetry_timeout=2.5):
+                 cmd_timeout=0.5, telemetry_timeout=2.5,
+                 require_safety=True, safety_timeout=1.0):
         self.max_vx = float(max_vx)
         self.max_vy = float(max_vy)
         self.max_wz = float(max_wz)
         self.cmd_timeout = float(cmd_timeout)
         self.telemetry_timeout = float(telemetry_timeout)
+        # ⚠️ 默认 True：安全层不在跑就**不许动**（D-037）。台架实验要显式关掉。
+        self.require_safety = bool(require_safety)
+        self.safety_timeout = float(safety_timeout)
 
         self._cmd = (0.0, 0.0, 0.0)
         self._cmd_time = None
@@ -88,6 +115,12 @@ class MotorSafetyGate:
         self._link = LINK_STARTUP
         self._needs_rearm = False
         self._left_moving = False   # 失联发生的那一刻，底盘是否"可能还在动"
+
+        # 安全层（D-037）
+        self._safety_time = None
+        self._safety_latched = False
+        self._safety_blocked = False        # 上一周期的判定（用来识别"跳变"）
+        self._safety_left_moving = False    # 被安全层拦下那一刻，底盘是否"可能还在动"
 
     # ---------- 输入 ----------
 
@@ -107,6 +140,41 @@ class MotorSafetyGate:
     def on_battery(self, now):
         """底盘电池遥测到达（存活判据之一）。"""
         self._battery_time = now
+
+    def on_safety_status(self, latched, now):
+        """安全层的状态到达（`/embodied/safety/status` 的第一个字段）。"""
+        self._safety_time = now
+        self._safety_latched = bool(latched)
+
+    # ---------- 安全层否决（D-037）----------
+
+    def safety_age(self, now):
+        """安全层状态的新鲜度（秒）；从未收到过为 None。"""
+        return None if self._safety_time is None else (now - self._safety_time)
+
+    @property
+    def safety_latched(self):
+        """安全层是否锁存（最近一次收到的值，不判断新鲜度）。"""
+        return self._safety_latched
+
+    @property
+    def safety_blocked(self):
+        """上一周期安全层是否拦住了本节点。"""
+        return self._safety_blocked
+
+    def _eval_safety(self, now):
+        """返回 (是否被拦, 安全层是否新鲜)。
+
+        ⚠️ **不新鲜 ≠ 放行**：本机没有物理急停（#22），安全层就是那个终审；
+           它不在，就不存在否决权 —— 所以"没消息"按**拦**处理（D-037）。
+        """
+        if not self.require_safety:
+            return False, False
+        age = self.safety_age(now)
+        fresh = age is not None and age <= self.safety_timeout
+        if not fresh:
+            return True, False
+        return self._safety_latched, True
 
     # ---------- 锁存停车 / 重新使能 ----------
 
@@ -154,9 +222,7 @@ class MotorSafetyGate:
         if self._link == LINK_ALIVE:
             # 刚刚失联：记住那一刻底盘"是否可能还在动"。
             # 判据 = 存在一条**未超时且非零**的指令（为零则底盘本来就是停的）。
-            cmd_active = (age_cmd is not None and age_cmd <= self.cmd_timeout
-                          and any(abs(c) > 1e-9 for c in self._cmd))
-            self._left_moving = cmd_active
+            self._left_moving = self._cmd_active(age_cmd)
             self._link = LINK_LOST
         # startup 且从未收到过遥测：不算"失联"（刚启动时本来就没有），
         # 否则每次启动都会先报一次假警报。
@@ -167,19 +233,38 @@ class MotorSafetyGate:
     def step(self, now):
         """本周期该发什么。
 
-        :return: (vx, vy, wz, state, age_cmd, age_imu, age_batt, link, needs_rearm)
+        :return: (vx, vy, wz, state, age_cmd, age_imu, age_batt, link, needs_rearm,
+                  age_safety, safety_latched, safety_blocked)
                  age_* 为秒；未收到过该信号时为 None。
-                 link ∈ {'startup', 'alive', 'lost'}；needs_rearm 为 bool。
+                 link ∈ {'startup', 'alive', 'lost'}；后三个 bool。
         """
         age_cmd = None if self._cmd_time is None else (now - self._cmd_time)
         age_imu = None if self._imu_time is None else (now - self._imu_time)
         age_batt = None if self._battery_time is None else (now - self._battery_time)
+        age_safety = self.safety_age(now)
 
         fresh = self._update_link(now, age_cmd, age_imu, age_batt)
 
+        # ---- 安全层否决的跳变处理（D-037）----
+        # 与链路失联同一条理由：只有"被拦下那一刻底盘可能还在动"才要求重新使能，
+        # 免得每次启动都多要一次确认。
+        blocked, _ = self._eval_safety(now)
+        if blocked and not self._safety_blocked:
+            self._safety_left_moving = self._cmd_active(age_cmd)
+        elif not blocked:
+            if self._safety_blocked and self._safety_left_moving:
+                self._needs_rearm = True
+            self._safety_left_moving = False
+        self._safety_blocked = blocked
+
         def out(state, vx=0.0, vy=0.0, wz=0.0):
             return (vx, vy, wz, state, age_cmd, age_imu, age_batt,
-                    self._link, self._needs_rearm)
+                    self._link, self._needs_rearm,
+                    age_safety, self._safety_latched, self._safety_blocked)
+
+        if blocked:
+            # ⚠️ 优先级**最高**：安全层的否决排在本地锁存之前（`Safety > Control`）。
+            return out(self.STATE_SAFETY_BLOCKED)
 
         if self._latched:
             return out(self.STATE_STOPPED)
@@ -199,6 +284,11 @@ class MotorSafetyGate:
 
         vx, vy, wz = self._cmd
         return out(self.STATE_OK, vx, vy, wz)
+
+    def _cmd_active(self, age_cmd):
+        """此刻是否存在一条**未超时且非零**的指令（= 底盘"可能还在动"）。"""
+        return (age_cmd is not None and age_cmd <= self.cmd_timeout
+                and any(abs(c) > 1e-9 for c in self._cmd))
 
     # ---------- 内部 ----------
 

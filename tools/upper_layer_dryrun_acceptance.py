@@ -25,7 +25,7 @@ Motor Driver 默认 `dry_run=true`：它**不向 `/cmd_vel` 发布任何东西**
     embodied_lidar_driver
     embodied_skill_gateway       (allow_motion:=true)
     embodied_command_router      (allow_motion:=true)
-    embodied_safety_runtime
+    embodied_safety_runtime        (⚠️ 必须 enable_obstacle_guard:=false —— 见下)
     embodied_autonomous_skills
     embodied_agent_runtime       (allow_motion:=true,
                                   rules_json 里要有 '向前走一小段' 那条规则)
@@ -35,6 +35,21 @@ Motor Driver 默认 `dry_run=true`：它**不向 `/cmd_vel` 发布任何东西**
     source ~/ros2_ws/install/setup.bash
     source ~/JetsonRobot/embodied_agent_ws/install/setup.bash
     python3 tools/upper_layer_dryrun_acceptance.py
+
+⚠️ **两条 2026-10-07 之后新增的耦合，验收前必须知道**（D-036 / D-037）：
+
+  ① **避障守卫会拦住运动学验收**。本工装全程在命令"向前走"，而守卫看的是
+     Motor Driver 状态里**被命令的速度**（干跑时它照样非零）。车前方若在
+     `obstacle_min_range`（默认 0.20 m）内有回波，守卫会锁存 → Motor Driver 被拦 →
+     干跑话题上全变成零 → 本工装会看到"链没动"。
+     ⇒ **跑本工装时请把守卫关掉**：`safety_runtime.launch.py enable_obstacle_guard:=false`。
+
+  ② **Motor Driver 现在要求安全层在场**。它直接读 `/embodied/safety/status`，
+     Safety Runtime 不在（或状态停更）时**拒绝运动**（状态码 5）。
+     ⇒ 本工装的前置里必须真的有 Safety Runtime 在跑；只想跑 Motor Driver 做台架实验时，
+        要显式 `motor_driver.launch.py require_safety:=false`。
+     （本工装的 `release_estop()` 已经把 Safety 的 `~/release` 与 Motor Driver 的
+      `~/resume` **一起**调了，这一点不受影响。）
 
 退出码：0 = 全部断言通过；1 = 有断言失败。
 """

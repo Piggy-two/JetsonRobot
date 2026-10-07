@@ -12,7 +12,13 @@ from embodied_motor_driver.safety_gate import (
 
 
 def make(**kw):
-    """默认参数的安全门 + 一个已经"活"起来的底盘（否则什么都动不了）。"""
+    """默认参数的安全门 + 一个已经"活"起来的底盘（否则什么都动不了）。
+
+    ⚠️ 这里显式 `require_safety=False`：本文件下面绝大多数用例验的是**别的规则**
+    （限幅 / 指令超时 / 存活判据 / 链路失联），安全层那一条会**盖住它们全部**
+    （它在优先级最高处）。安全层本身的规则由本文件末尾专门的用例覆盖。
+    """
+    kw.setdefault('require_safety', False)
     g = MotorSafetyGate(**kw)
     g.on_imu(0.0)
     g.on_battery(0.0)
@@ -43,9 +49,9 @@ def test_nan_becomes_zero():
 
 def test_step_always_returns_a_velocity():
     """核心不变量：step() 永不返回"什么都不发"。底盘保持最后一条指令，不发 != 停。"""
-    g = MotorSafetyGate()          # 连遥测都没有
+    g = MotorSafetyGate(require_safety=False)   # 连遥测都没有
     out = g.step(0.0)
-    assert len(out) == 9
+    assert len(out) == 12
     assert out[:3] == (0.0, 0.0, 0.0)
 
 
@@ -64,7 +70,7 @@ def test_cmd_timeout_zeroes_output():
 # ---------- D-021：存活判据 ----------
 
 def test_no_telemetry_means_lost_and_zero():
-    g = MotorSafetyGate()
+    g = MotorSafetyGate(require_safety=False)
     g.on_cmd(0.2, 0.0, 0.0, now=0.0)
     vx, _, _, state, *_ = g.step(0.1)
     assert vx == 0.0 and state == MotorSafetyGate.STATE_TELEMETRY_LOST
@@ -79,7 +85,7 @@ def test_stale_telemetry_means_lost():
 
 def test_telemetry_alive_if_either_signal_is_fresh():
     """imu 停了但 battery 还在 -> 仍算底盘在线（取较新的那个）。"""
-    g = MotorSafetyGate(telemetry_timeout=1.0)
+    g = MotorSafetyGate(telemetry_timeout=1.0, require_safety=False)
     g.on_battery(5.0)
     g.on_cmd(0.2, 0.0, 0.0, now=5.0)
     assert g.step(5.2)[3] == MotorSafetyGate.STATE_OK
@@ -105,7 +111,7 @@ def test_telemetry_loss_invalidates_stored_command():
     g.step(3.0)                                  # 遥测超时 -> 失联 + 作废指令
     g.on_imu(3.1)                                # 底盘"回来了"
     g.on_battery(3.1)
-    vx, _, _, state, age_cmd, _, _, _, _ = g.step(3.2)
+    vx, _, _, state, age_cmd, *_ = g.step(3.2)
     assert vx == 0.0
     assert age_cmd is None                       # 指令确实被作废了，不是靠超时兜住的
     assert state == MotorSafetyGate.STATE_REARM_REQUIRED
@@ -134,7 +140,7 @@ def test_resume_allows_motion_again():
 
 
 def test_stop_outranks_telemetry_loss():
-    g = MotorSafetyGate()
+    g = MotorSafetyGate(require_safety=False)
     g.stop()
     _, _, _, state, *_ = g.step(0.0)
     assert state == MotorSafetyGate.STATE_STOPPED
@@ -145,22 +151,23 @@ def test_state_codes_are_distinct():
     assert len(set(codes)) == len(list(codes))
 
 
-def test_step_returns_nine_fields():
-    assert len(MotorSafetyGate().step(0.0)) == 9
+def test_step_returns_twelve_fields():
+    """返回值是**位置约定**（status 话题直接照它填），所以字段数也要钉住。"""
+    assert len(MotorSafetyGate().step(0.0)) == 12
 
 
 # ---------- 链路状态机与「失联后需重新使能」（D-021 的安全窗口） ----------
 
 def test_startup_is_not_reported_as_link_lost():
     """刚启动、从未收到过遥测时**不算失联** —— 否则每次开机都先来一次假警报。"""
-    g = MotorSafetyGate()
+    g = MotorSafetyGate(require_safety=False)
     out = g.step(10.0)
     assert out[7] == LINK_STARTUP
     assert out[3] == MotorSafetyGate.STATE_TELEMETRY_LOST   # 仍然输出零（安全）
 
 
 def test_link_goes_lost_then_requires_rearm_if_it_was_moving():
-    g = MotorSafetyGate(cmd_timeout=2.0, telemetry_timeout=1.0)
+    g = MotorSafetyGate(cmd_timeout=2.0, telemetry_timeout=1.0, require_safety=False)
     g.on_imu(0.0)
     g.on_battery(0.0)
     g.on_cmd(0.2, 0.0, 0.0, now=0.0)
@@ -179,7 +186,7 @@ def test_link_goes_lost_then_requires_rearm_if_it_was_moving():
 
 def test_no_rearm_needed_if_it_was_idle_when_link_dropped():
     """失联前本来就是静止/零指令 —— 恢复后没有理由多要一次确认。"""
-    g = MotorSafetyGate(cmd_timeout=2.0, telemetry_timeout=1.0)
+    g = MotorSafetyGate(cmd_timeout=2.0, telemetry_timeout=1.0, require_safety=False)
     g.on_imu(0.0)
     g.on_battery(0.0)
     g.on_cmd(0.0, 0.0, 0.0, now=0.0)
@@ -199,7 +206,7 @@ def test_rearm_blocks_motion_even_while_upstream_keeps_commanding():
     链路一恢复，那条指令会立刻生效 -> 机器人毫无预兆地继续跑，
     而操作者正以为它是停着的、甚至可能正在搬它。
     """
-    g = MotorSafetyGate(cmd_timeout=5.0, telemetry_timeout=1.0)
+    g = MotorSafetyGate(cmd_timeout=5.0, telemetry_timeout=1.0, require_safety=False)
     g.on_imu(0.0)
     g.on_battery(0.0)
     g.on_cmd(0.2, 0.0, 0.0, now=0.0)
@@ -214,7 +221,7 @@ def test_rearm_blocks_motion_even_while_upstream_keeps_commanding():
 
 
 def test_resume_clears_rearm_and_motion_may_continue():
-    g = MotorSafetyGate(cmd_timeout=5.0, telemetry_timeout=1.0)
+    g = MotorSafetyGate(cmd_timeout=5.0, telemetry_timeout=1.0, require_safety=False)
     g.on_imu(0.0)
     g.on_battery(0.0)
     g.on_cmd(0.2, 0.0, 0.0, now=0.0)
@@ -240,3 +247,114 @@ def test_stop_latch_cleared_by_resume_too():
     assert g.latched
     g.resume()
     assert not g.latched and not g.needs_rearm
+
+
+# ---------- 安全层否决（D-037）：把否决权从「咨询性」变成「结构性」 ----------
+
+def test_safety_never_seen_blocks_motion():
+    """⚠️ 核心决策：安全层不在跑 = 不存在否决权 ⇒ **不许动**（不是"放行"）。"""
+    g = make(require_safety=True)          # 从未收到过安全层状态
+    g.on_cmd(0.2, 0.0, 0.0, now=0.1)
+    vx, _, _, state, *_ = g.step(0.2)
+    assert state == MotorSafetyGate.STATE_SAFETY_BLOCKED
+    assert vx == 0.0
+    assert g.safety_age(0.2) is None
+
+
+def test_safety_latched_blocks_even_with_a_fresh_command():
+    g = make(require_safety=True, safety_timeout=5.0, cmd_timeout=5.0)
+    g.on_safety_status(True, 0.0)
+    g.on_cmd(0.2, 0.0, 0.0, now=0.1)
+    vx, _, _, state, *_ = g.step(0.2)
+    assert state == MotorSafetyGate.STATE_SAFETY_BLOCKED
+    assert vx == 0.0
+
+
+def test_safety_stale_blocks_motion():
+    """安全层**停更**与"从未见过"同样按拦处理 —— 半死不活的安全层不算安全层。"""
+    g = make(require_safety=True, safety_timeout=1.0, cmd_timeout=5.0)
+    g.on_safety_status(False, 0.0)
+    g.on_cmd(0.2, 0.0, 0.0, now=0.0)
+    assert g.step(0.5)[3] == MotorSafetyGate.STATE_OK
+    assert g.step(1.5)[3] == MotorSafetyGate.STATE_SAFETY_BLOCKED    # 龄 1.5 > 1.0
+    assert g.step(1.5)[0] == 0.0
+
+
+def test_safety_boundary_is_still_fresh():
+    """正好等于阈值算新鲜（与 D-025 的 `>` 口径一致）。"""
+    g = make(require_safety=True, safety_timeout=1.0, cmd_timeout=5.0)
+    g.on_safety_status(False, 0.0)
+    g.on_cmd(0.2, 0.0, 0.0, now=0.0)
+    assert g.step(1.0)[3] == MotorSafetyGate.STATE_OK
+    assert g.step(1.01)[3] == MotorSafetyGate.STATE_SAFETY_BLOCKED
+
+
+def test_require_safety_false_never_blocks():
+    """台架实验的显式放行口：关掉它，本节点行为回到 D-025 那一版。"""
+    g = make(require_safety=False, cmd_timeout=5.0)
+    g.on_cmd(0.2, 0.0, 0.0, now=0.1)
+    vx, _, _, state, *_ = g.step(0.2)
+    assert state == MotorSafetyGate.STATE_OK
+    assert vx == pytest.approx(0.2)
+    assert g.safety_blocked is False
+
+
+def test_safety_outranks_the_local_latch_in_the_reported_state():
+    """`Safety > Control`：两个都拦着时，报出的是安全层那个原因。"""
+    g = make(require_safety=True, safety_timeout=5.0)
+    g.on_safety_status(True, 0.0)
+    g.stop()
+    assert g.step(0.2)[3] == MotorSafetyGate.STATE_SAFETY_BLOCKED
+    g.on_safety_status(False, 0.3)
+    assert g.step(0.3)[3] == MotorSafetyGate.STATE_STOPPED
+
+
+def test_safety_loss_while_commanding_requires_rearm_on_return():
+    """被安全层拦下时"底盘可能还在动" ⇒ 它回来后**不能自己接着跑**（D-025 的同一理由）。"""
+    g = make(require_safety=True, safety_timeout=0.5, cmd_timeout=5.0)
+    g.on_safety_status(False, 0.0)
+    g.on_cmd(0.2, 0.0, 0.0, now=0.1)
+    assert g.step(0.2)[3] == MotorSafetyGate.STATE_OK
+
+    vx, _, _, state, *_ = g.step(1.0)          # 安全层停更 1.0 s > 0.5
+    assert state == MotorSafetyGate.STATE_SAFETY_BLOCKED
+    assert vx == 0.0
+
+    g.on_safety_status(False, 1.1)             # 安全层回来了，且**没有**锁存
+    vx, _, _, state, *_ = g.step(1.1)
+    assert state == MotorSafetyGate.STATE_REARM_REQUIRED
+    assert vx == 0.0
+
+
+def test_resume_clears_the_safety_induced_rearm():
+    g = make(require_safety=True, safety_timeout=0.5, cmd_timeout=5.0)
+    g.on_safety_status(False, 0.0)
+    g.on_cmd(0.2, 0.0, 0.0, now=0.1)
+    g.step(1.0)
+    g.on_safety_status(False, 1.1)
+    assert g.step(1.1)[3] == MotorSafetyGate.STATE_REARM_REQUIRED
+    g.resume()
+    vx, _, _, state, *_ = g.step(1.2)
+    assert state == MotorSafetyGate.STATE_OK
+    assert vx == pytest.approx(0.2)
+
+
+def test_safety_block_without_a_command_returns_without_rearm():
+    """本来就没在动 —— 不该多要一次确认（否则每次启动都会人烦一次）。"""
+    g = make(require_safety=True, safety_timeout=0.5, cmd_timeout=5.0)
+    g.on_safety_status(False, 0.0)
+    assert g.step(1.0)[3] == MotorSafetyGate.STATE_SAFETY_BLOCKED
+    g.on_safety_status(False, 1.1)
+    g.on_cmd(0.2, 0.0, 0.0, now=1.15)
+    vx, _, _, state, *_ = g.step(1.2)
+    assert state == MotorSafetyGate.STATE_OK
+    assert vx == pytest.approx(0.2)
+
+
+def test_safety_properties_reflect_the_last_message():
+    g = make(require_safety=True)
+    g.on_safety_status(True, 3.0)
+    assert g.safety_latched is True
+    assert g.safety_age(3.4) == pytest.approx(0.4)
+    g.on_safety_status(False, 4.0)
+    assert g.safety_latched is False

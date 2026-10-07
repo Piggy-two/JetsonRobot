@@ -40,6 +40,12 @@
     【1】【2】【3】 → /control_skills/* 服务（Control Skill 直调）
     【4】        → 文本 → Command Router → Skill Gateway → Control Skill → Motor Driver
 
+⚠️ **两条 2026-10-07 之后新增的耦合**（D-036 / D-037）：跑本工装时
+   ① Safety Runtime 必须**关掉避障守卫**（`enable_obstacle_guard:=false`）——
+      它会拦住正在被命令前进的运动（判据见 `upper_layer_dryrun_acceptance.py` 的说明）；
+   ② Motor Driver 现在**要求安全层在场**（`require_safety` 默认 true），所以
+      Safety Runtime 必须真的在跑，否则 Motor Driver 拒绝运动（状态码 5）。
+
 前置（全部已启动，且 Motor Driver 必须 `dry_run:=false`）：
     embodied_motor_driver (dry_run:=false) / embodied_control_skills /
     embodied_skill_gateway (allow_motion:=true) / embodied_command_router (allow_motion:=true) /

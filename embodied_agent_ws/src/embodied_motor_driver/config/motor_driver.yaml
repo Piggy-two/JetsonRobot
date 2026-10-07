@@ -35,3 +35,15 @@ motor_driver:
     #    取 2.5 s 给 battery 留了 2 倍余量；若按 imu 的周期（21 ms）去定，
     #    imu 单独失效时会跟着 battery 的节拍在阈值上下反复抖动。
     telemetry_timeout: 2.5
+
+    # ---- 安全层否决（D-037）----
+    # 本节点**直接读安全层的状态**，Safety Runtime 锁存期间自己输出零。
+    # 为什么必须这样：`/cmd_vel` 上有**两个并列发布者**、没有仲裁（#28 / DEV_NOTES 坑 23）。
+    # 实测（tools/cmd_vel_arbitration_probe.py）：下游 `/motor_driver/stop` **调不通**时，
+    # 那条话题上**非零占 66%**（= 速率比 20/(20+10)）且**不衰减** —— 那时"急停"是抖着走。
+    # 改成读状态之后，否决不依赖"谁先谁后"，**也不依赖任何服务调用是否成功**。
+    require_safety: true
+    safety_status_topic: /embodied/safety/status
+    # 安全层状态多久没来即视为"没有安全层"。Safety Runtime 的 status 是 10 Hz，
+    # 1.0 s = 漏 10 帧才判定。
+    safety_timeout: 1.0
