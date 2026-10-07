@@ -53,7 +53,7 @@ from std_msgs.msg import Float64MultiArray
 from embodied_skills_interfaces.msg import SkillEvent
 from embodied_skills_interfaces.srv import AgentTask, SkillCancel, SkillInvoke
 
-from embodied_agent_runtime import execution, planner
+from embodied_agent_runtime import execution, llm_client, llm_planner, planner
 from embodied_agent_runtime.memory import AgentMemory
 
 # 网关的注册表是"有哪些技能"的唯一事实来源 —— 本节点直接读**同一份数据**，
@@ -85,6 +85,19 @@ class AgentRuntime(Node):
         # ⚠️ 三层闸门的第一层（D-033）。默认 false —— 本节点能间接让车动。
         self.declare_parameter('allow_motion', False)
 
+        # ---- 云端 LLM 规划（Phase 7 / D-038）----
+        # ⚠️ **默认关闭**，而且是刻意的两条理由：
+        #   ① 它会把**用户说的话发到第三方**（对外发送数据）；
+        #   ② 与 dry_run / allow_motion / require_safety 一样，闸门默认在保守那侧。
+        # 关掉时"复杂任务"仍然被**明确拒绝**，理由会说清是"没开"而不是"不会"。
+        self.declare_parameter('llm_enabled', False)
+        self.declare_parameter('llm_base_url', '')
+        self.declare_parameter('llm_model', '')
+        # ⚠️ 只写**变量名**，不写密钥本身 —— 密钥绝不进仓库（CLAUDE.md §6）。
+        self.declare_parameter('llm_api_key_env', '')
+        self.declare_parameter('llm_timeout', 8.0)
+        self.declare_parameter('llm_max_tokens', 400)
+
         g = lambda n: self.get_parameter(n).value          # noqa: E731
 
         reg_file = str(g('registry_file'))
@@ -100,6 +113,10 @@ class AgentRuntime(Node):
         self.memory = AgentMemory(capacity=int(g('memory_capacity')))
         self._executor = execution.Executor(capacity=int(g('task_capacity')))
         self._lock = threading.Lock()
+        # 单飞闸门：护住"问 LLM"那一跳（见 llm_planner.plan_task 的说明）
+        self._planning_lock = threading.Lock()
+
+        self.llm, self._llm_why = self._build_llm(g)
 
         self._evt_group = ReentrantCallbackGroup()
         self._srv_group = ReentrantCallbackGroup()
@@ -124,11 +141,54 @@ class AgentRuntime(Node):
             f'事件 <- {g("event_topic")} | 网关 -> {g("gateway_service")}')
         if not self.rules:
             self.get_logger().warn(
-                '⚠️ 规则表为空 ⇒ 任何自然语言任务都会被**明确拒绝**'
-                '（需要 LLM 规划，Phase 7 未实现）。这是刻意的默认值')
+                '⚠️ 规则表为空 ⇒ 只有 LLM 那一跳能规划；它没开时任何自然语言任务'
+                '都会被**明确拒绝**。这是刻意的默认值')
         if not g('allow_motion'):
             self.get_logger().warn(
                 '🔒 allow_motion=false：拒绝派发可能引起运动的技能（D-033）')
+        if self.llm is not None:
+            self.get_logger().info(
+                f'LLM 规划已启用：{g("llm_base_url")} 模型 {g("llm_model")} | '
+                f'上限 {self.llm.timeout_s:g}s | '
+                f'菜单里 {len(llm_planner.skill_menu(self.registry))} 个 task-tier 技能 | '
+                f'⚠️ 用户文本会**发往该端点**')
+        else:
+            self.get_logger().warn(
+                f'LLM 规划这一跳没开：{self._llm_why} —— 规则表没命中的任务'
+                '会被明确拒绝，且理由里会写清是"没开"而不是"不会"（D-038）')
+
+    # ---------- 云端 LLM（Phase 7 / D-038）----------
+
+    def _build_llm(self, g):
+        """配好 LLM 客户端；任何一步不满足就返回 `(None, 为什么)`。
+
+        ⚠️ **读不到密钥不是启动错误**，只是这一跳没开 —— 机器人本来就该在
+        没有网络的房间里继续做它本地能做的事（`plan.md` §18 的降级要求）。
+        但**理由必须留得下来**，好在每次拒绝时如实告诉人。
+        """
+        if not g('llm_enabled'):
+            return None, llm_planner.REFUSE_LLM_DISABLED
+        base_url = str(g('llm_base_url') or '').strip()
+        model = str(g('llm_model') or '').strip()
+        if not base_url or not model:
+            return None, '没有配置 llm_base_url / llm_model'
+        env_name = str(g('llm_api_key_env') or '').strip()
+        if not env_name:
+            return None, '没有配置 llm_api_key_env（密钥只从环境变量读，不进仓库）'
+        key = llm_client.read_api_key(env_name)
+        if not key:
+            # ⚠️ **不回显变量值**，只说变量名 —— 它可能被写成了密钥本身
+            return None, f'环境变量 {env_name} 里没有读到 API key'
+
+        timeout_s = float(g('llm_timeout'))
+        budget = float(g('submit_timeout'))
+        if budget > 0:
+            # `submit_timeout` 从此有了真实含义：**整个 submit 路径的预算**。
+            # 它约束的是这条路上最慢的那一跳（就是这次网络调用）。
+            timeout_s = min(timeout_s, budget)
+        return llm_client.OpenAiCompatClient(
+            base_url=base_url, model=model, api_key=key,
+            timeout_s=timeout_s, max_tokens=int(g('llm_max_tokens'))), ''
 
     # ---------- 规则表 ----------
 
@@ -165,8 +225,26 @@ class AgentRuntime(Node):
     # ---------- 入口 ----------
 
     def on_submit(self, req, res):
-        """规划一个自然语言任务。**不做任何阻塞等待** —— 受理即返回。"""
-        result = planner.plan(req.text, self.rules, self.registry)
+        """规划一个自然语言任务。**受理即返回**（技能的真正执行是异步的）。
+
+        ⚠️ 两跳：**规则表优先**（离线、确定、快），没命中才问 LLM（D-038）。
+        问 LLM 会让**这一个回调**阻塞几秒 —— 单飞闸门保证同一时刻只有一次
+        （见 `llm_planner.plan_task` 里那段说明）。
+        """
+        t0 = time.monotonic()
+        plan = llm_planner.plan_task(
+            req.text, self.rules, self.registry, self.llm, guard=self._planning_lock)
+        result, source, raw = plan.result, plan.source, plan.raw
+        elapsed = time.monotonic() - t0
+
+        # 规划痕迹进日志：**哪一跳**、**耗时**、以及 LLM 的**原始回包**。
+        # 模型说了什么必须留得下来 —— 拒绝理由面向人，原文面向排查。
+        self.get_logger().info(
+            f'规划 {req.text!r} → {source}｜{elapsed * 1000:.0f} ms｜'
+            f'{"接受 " + str(result.skill) if result.accepted else "拒绝 " + result.reason}')
+        if raw:
+            # 截断，但留足能看出它在胡说多少的长度
+            self.get_logger().info(f'LLM 原始回包：{raw[:500]!r}')
 
         if not result.accepted:
             res.accepted = False

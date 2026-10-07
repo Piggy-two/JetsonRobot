@@ -88,10 +88,10 @@ Jetson Orin（L4T R36.4.3 / JetPack 6.x）是中央计算节点，承担：
 | 语音识别 ASR | `xf_mic_asr_offline`（厂商离线 ASR） | ✅ 包已存在，❓ 待实机验收 |
 | **Skill Gateway + Registry** | `embodied_skill_gateway`（Overlay）：D-005 的六项检查 + **数据驱动的注册表** + 任务表与 8 状态机。🔒 **唯一被允许直接调用技能服务的进程** | ✅ 已实现（2026-10-07，D-029/D-030/D-031/D-032） |
 | **Hybrid Command Router** | `embodied_command_router`（Overlay）：安全词 / 确定性命令 / 复杂任务三分类 + 中文命令解析。安全词判定**复用** `estop.py` 的整句匹配 | ✅ 已实现（2026-10-07，D-006） |
-| **Agent Runtime** | `embodied_agent_runtime`（Overlay）：**Executor**（WAIT 推进 / 超时 / 唤醒判定）+ **Event Manager** + **Memory**（有界）。⚠️ **Planner 是 stub**（规则表查表，默认空 ⇒ 拒绝一切），LLM 规划与重规划属 Phase 7 | ⚠️ 骨架已实现（2026-10-07，D-035）；**未真机验证** |
+| **Agent Runtime** | `embodied_agent_runtime`（Overlay）：**Executor**（WAIT 推进 / 超时 / 唤醒判定）+ **Event Manager** + **Memory**（有界）+ **Planner 两跳**（**D-038**：规则表优先，没命中才交给**云端 LLM** 选一个 task-tier 技能；**默认关闭**；单步）。🔒 红线在代码里执行，两条路**共用一个校验口** | ⚠️ 骨架 + LLM 接口已实现（2026-10-07，D-035 / D-038）；**未真机验证**、**未接真端点**；**重规划与多步计划未做** |
 | **Autonomous Skill** | `embodied_autonomous_skills`（Overlay）：第一个 task-tier 技能 `advance_until_blocked` —— **闭环**（每步重新问 LiDAR） | ⚠️ 已实现（2026-10-07，D-034）；**未真机验证**，受 `allow_motion` 闸门约束 |
 | 本地轻量 LLM | 后期加入，用于简单语言理解 / Tool Calling / 离线模式 | 📋 第一版不做 |
-| 云端 LLM 调用 | 复杂任务规划、多步骤推理、异常处理 | 📋 |
+| 云端 LLM 调用 | 复杂任务规划、多步骤推理、异常处理 | 🚧 **接口已接（D-038）**：OpenAI 兼容端点、**默认关闭**、**单步**（多步与重规划未做）；失败分类充分（超时/连不上/回包烂各是各的话），**绝不静默降级** |
 | TensorRT 视觉推理 | GStreamer → CUDA → TensorRT → YOLO → Tracker | 📋 |
 | 相机 Driver | `embodied_camera_driver`（Overlay，Driver 层）：收口厂商相机源——**重新打时间戳**（原始戳早 0.72 s） + **补发 TF 帧** `camera_link0 → camera`。只做确定性数据整形，不含语义/规划 | ✅ 已实现（2026-10-05） |
 | ROS2 | Humble | ✅ |
@@ -132,10 +132,11 @@ Hardware
 >
 > 📌 **已落地的部分（2026-10-07）**：`embodied_skill_gateway`（Skill Gateway + 注册表 + 任务表）、
 > `embodied_command_router`（Hybrid Command Router，§7）、
-> `embodied_agent_runtime`（**Executor / Event Manager / Memory**；Planner 是 stub）、
+> `embodied_agent_runtime`（**Executor / Event Manager / Memory** + **Planner 两跳**：
+> 规则表优先，没命中才问**云端 LLM**；**默认关闭**、单步，**D-038**）、
 > `embodied_autonomous_skills`（第一个 task-tier 技能）。
 > **Skill Manager 的独立进程形态仍是设计**（第一版与 Gateway 同进程，D-029 决策 4）。
-> 详见 **D-029 / D-030 / D-031 / D-032 / D-034 / D-035**。
+> 详见 **D-029 / D-030 / D-031 / D-032 / D-034 / D-035 / D-038**。
 
 ### 5.2 自下而上的反馈流
 

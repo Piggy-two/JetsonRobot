@@ -50,6 +50,23 @@ def generate_launch_description():
                         '格式见 config/rules_example.yaml。'
                         '🔒 只能写 task-tier 技能，写 control.* 会被拒（D-003）'),
         DeclareLaunchArgument(
+            'llm_enabled', default_value='false',
+            description='云端 LLM 规划（D-038）。默认关：它会把**用户说的话发到第三方**。'
+                        '打开的完整条件是「llm_enabled=true + llm_base_url + llm_model '
+                        '+ 那个环境变量里有 key」，缺哪一样都会在启动日志里说清是哪一样'),
+        DeclareLaunchArgument(
+            'llm_base_url', default_value='',
+            description='OpenAI 兼容端点，例如 https://api.deepseek.com/v1'),
+        DeclareLaunchArgument(
+            'llm_model', default_value='',
+            description='模型名。⚠️ 各家名字不一样，填错会在调用时被端点拒'),
+        DeclareLaunchArgument(
+            'llm_api_key_env', default_value='',
+            description='**密钥所在的环境变量名**（不是密钥本身 —— 它绝不进仓库）'),
+        DeclareLaunchArgument(
+            'llm_timeout', default_value='8.0',
+            description='单次 LLM 调用的硬上限（秒）。超了按调用失败拒绝，不静默降级'),
+        DeclareLaunchArgument(
             'allow_motion', default_value='false',
             description='三层闸门：是否允许派发可能引起运动的技能。'
                         '⚠️ 打开它不等于车会动 —— 还要看网关与 Motor Driver'),
@@ -61,6 +78,11 @@ def generate_launch_description():
             parameters=[cfg, {
                 'rules_file': LaunchConfiguration('rules_file'),
                 'allow_motion': LaunchConfiguration('allow_motion'),
+                'llm_enabled': LaunchConfiguration('llm_enabled'),
+                'llm_base_url': LaunchConfiguration('llm_base_url'),
+                'llm_model': LaunchConfiguration('llm_model'),
+                'llm_api_key_env': LaunchConfiguration('llm_api_key_env'),
+                'llm_timeout': LaunchConfiguration('llm_timeout'),
             }],
         ),
     ])

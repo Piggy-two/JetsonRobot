@@ -385,7 +385,15 @@ def main():
         else:
             check('明确拒绝而不是含糊接受', res.accepted is False,
                   f'accepted={res.accepted}')
-            check('理由写清了是缺 LLM', 'Phase 7' in res.message,
+            # ⚠️ 这一条 2026-10-07 改过措辞判据（D-038）：LLM 那一跳**已经接上了**，
+            #    所以"没命中的任务"被拒时，理由里应当写清**为什么这一跳用不了**
+            #    （没开 / 没配端点 / 没读到密钥 / 连不上），而不是再说一句
+            #    已经过时的"Phase 7 未实现" —— **理由必须与事实一致**，
+            #    否则它会把人指到"等一个已经做完的功能"上去。
+            check('理由写清了 LLM 那一跳为什么没用上',
+                  ('LLM' in res.message and
+                   ('未启用' in res.message or '不可用' in res.message
+                    or '调用失败' in res.message or '无法解析' in res.message)),
                   f'message={res.message!r}')
         print()
 

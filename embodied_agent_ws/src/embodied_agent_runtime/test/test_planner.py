@@ -9,10 +9,18 @@ from embodied_skill_gateway.registry import ParamSpec, Registry, SkillSpec
 
 
 def _registry():
+    # ⚠️ 这几个 ParamSpec 要**与真注册表同形**（`skill_registry.yaml` 里
+    #    `advance_until_blocked` 声明了三个参数，且都是必填）。
+    #    本测试原本只声明了 `max_distance` —— 那时 planner 不校验参数，看不出差别；
+    #    现在两条规划路径共用 `accept_skill()`、参数校验也接上了，声明不全就会
+    #    让"合法的规则"被误判成"多写了参数"。
     return Registry([
         SkillSpec('autonomous.advance_until_blocked', tier='task',
                   target='/autonomous_skills/advance_until_blocked', srv_type='s',
-                  params=[ParamSpec('max_distance')], timeout_s=45.0,
+                  params=[ParamSpec('max_distance', minimum=0.01, maximum=0.5),
+                          ParamSpec('clear_range', minimum=0.1, maximum=1.0),
+                          ParamSpec('step', minimum=0.02, maximum=0.2)],
+                  timeout_s=45.0,
                   allowed_principals=['agent.planner']),
         SkillSpec('control.move_relative', tier='control',
                   target='/control_skills/move_relative', srv_type='s',
@@ -34,21 +42,23 @@ TASK_RULE = {'走一小段': {'skill': 'autonomous.advance_until_blocked',
 
 # ---------- 默认：什么都不做 ----------
 
-def test_empty_rule_table_refuses_everything():
-    """★ 默认规则表为空 ⟹ 任何自然语言任务都被拒绝，理由写明是 Phase 7 没到。
+def test_empty_rule_table_refuses_without_naming_a_skill():
+    """★ 规则表为空 ⟹ 规则这一跳拒绝，且**不编造**一个技能名。
 
-    这不是缺陷，是刻意的。宁可明确说"我还不会"，也不要含糊地"嗯"一声。
+    ⚠️ 措辞在 D-038 之后改过：以前写"需要 LLM 规划，当前未实现（Phase 7）"，
+    现在 LLM 已经接上了，"没命中"只说明**规则表里没有这一条** ——
+    能不能做由下一跳回答。理由必须与事实一致，否则会把人指到错的方向去。
     """
     r = planner.plan('去桌子旁边找杯子', {}, _registry())
     assert r.accepted is False
-    assert 'Phase 7' in r.reason
+    assert '没有匹配' in r.reason
     assert r.skill is None
 
 
 def test_unmatched_text_is_refused_with_the_same_honest_reason():
     r = planner.plan('把这个房间扫一遍', TASK_RULE, _registry())
     assert r.accepted is False
-    assert 'Phase 7' in r.reason
+    assert '没有匹配' in r.reason
 
 
 def test_empty_text_is_refused():
