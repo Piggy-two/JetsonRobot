@@ -20,6 +20,9 @@
                    ★ 这一段是本次修复的核心证据。
     --phase guard  验**避障停车**（D-036）：真雷达 + 真守卫，命令它前进，
                    看守卫是否在底盘侧把车拦住。
+    --phase direction  验守卫的**方向性**：先问四个方向各有多远，然后
+                   往**通畅**方向走（**必须放行**）+ 往**受阻**方向走（**必须拦下**）做对照。
+                   ⇒ 一个什么都拦的守卫会被关掉，等于没有；这一条防的是那个。
 
 配置 A（跑 `--phase veto`）—— **注意 `motor_stop_service` 指向不存在的服务**
 --------------------------------------------------------
@@ -56,7 +59,7 @@ from std_srvs.srv import Trigger
 
 from ros_robot_controller_msgs.msg import MotorsState
 
-from embodied_skills_interfaces.srv import MoveRelative
+from embodied_skills_interfaces.srv import MoveRelative, SectorMinRange
 
 SET_MOTOR = '/ros_robot_controller/set_motor'
 IMU = '/ros_robot_controller/imu_raw'
@@ -107,6 +110,8 @@ class SafetyChainTester(Node):
         self.motor_resume = self.create_client(Trigger, '/motor_driver/resume')
         self.safety_estop = self.create_client(Trigger, '/safety_runtime/estop')
         self.safety_release = self.create_client(Trigger, '/safety_runtime/release')
+        # 用与守卫**同一个原语**问各方向（这样"通畅"的判据与守卫看到的完全一致）
+        self.sector_cli = self.create_client(SectorMinRange, '/lidar_driver/sector_min_range')
 
     # ---------- 观测 ----------
 
@@ -348,9 +353,105 @@ def phase_guard(node, rep):
         node.mstat(I_STATE) == STATE_SAFETY_BLOCKED, f'state={node.mstat(I_STATE)}')
 
 
+def probe_direction(node, center, max_range=1.0):
+    """问某个方向 ±30°、1 m 内的最近回波（与守卫同一个原语、同一套几何）。"""
+    req = SectorMinRange.Request()
+    req.center = float(center)
+    req.width = 1.0471975511965976
+    req.max_range = float(max_range)
+    res = node.call(node.sector_cli, req, timeout=5.0)
+    if res is None:
+        return None, None
+    return (float(res.range) if res.valid else -1.0), float(res.angle)
+
+
+# 候选方向：(名字, 扇区中心角, 给 Control Skill 的请求)
+DIRECTIONS = [
+    ('前', 0.0, dict(x=0.3, y=0.0)),
+    ('左', 1.5707963267948966, dict(x=0.0, y=0.3)),
+    ('右', -1.5707963267948966, dict(x=0.0, y=-0.3)),
+    ('后', 3.141592653589793, dict(x=-0.3, y=0.0)),
+]
+
+#: 守卫在 0.15 m/s 下的阈值 = max(0.20, 0.15×1.5) = 0.225 m；
+#: 判"这个方向确实通畅"要求最近回波比它再远 1.5 倍以上，别贴着阈值下结论。
+CLEAR_MARGIN = 0.40
+
+
+def phase_direction(node, rep):
+    """★ D-036 的方向性：**同一个方向扇区里的东西，只有朝它走时才该拦**。"""
+    print('【1】先问四个方向 ±30°、1 m 内最近回波（用的就是守卫那个原语）')
+    probed = []
+    for name, center, move in DIRECTIONS:
+        r, a = probe_direction(node, center)
+        probed.append((name, center, move, r, a))
+        shown = '（无回波）' if r is None or r < 0 else f'{r:.3f} m'
+        print(f'    {name}（中心 {center * 57.29578:+.0f}°）：最近回波 {shown}')
+    if probed[0][3] is None:
+        rep('问到 LiDAR 原语', False, 'sector_min_range 不可用 —— liDAR Driver 在跑吗？')
+        return
+    rep('问到 LiDAR 原语', True, f'{len(probed)} 个方向')
+
+    clear = [p for p in probed if p[3] is not None and p[3] > CLEAR_MARGIN]
+    blocked = [p for p in probed if p[3] is not None and 0 < p[3] <= CLEAR_MARGIN]
+    if not clear:
+        print()
+        print(f'  ⛔ **四个方向都不通畅**（判据：最近回波要 > {CLEAR_MARGIN} m）—— 拒测。')
+        print('     这一条要的是"有通畅方向可走"，而不是把阈值调松。')
+        print('     请把车挪到某个方向前面是空的，或把前面的东西拿开。')
+        rep('存在一个通畅方向供测试', False, '四个方向都被挡')
+        return
+    rep('存在一个通畅方向', True, f'{clear[0][0]}（最近回波 {clear[0][3]:.3f} m）')
+
+    name, center, move, r, a = clear[0]
+    print(f'\n【2】★ 往**通畅的「{name}」**方向走 0.3 m —— 守卫**不该**拦它')
+    with node._lock:
+        node._reset()
+    req = MoveRelative.Request()
+    req.x = float(move['x'])
+    req.y = float(move['y'])
+    fut = node.move_cli.call_async(req)
+    node.spin_for(2.5)
+    spans, smax, rps, rmax = node.snapshot()
+    latched = (node.sstat(0) or 0) > 0.5
+    print(f'    {fmt(node, spans, smax, rps, rmax)}')
+    print(f'    Control Skill：{getattr(fut.result(), "message", "（还没回）") if fut.done() else "（进行中）"}')
+    rep(f'★ 守卫**没有**拦「{name}」方向的运动', not latched, f'safety status[0]={node.sstat(0)}')
+    rep(f'★ 而且轮子真的朝「{name}」转了', rmax > 0.1, f'窗口内最大 |rps| {rmax:.4f}')
+    node.spin_for(1.0)
+
+    if not blocked:
+        print('\n（本次没有"受阻方向"，跳过对照 —— 但【1】已经证明守卫看得到方向上的差异）')
+        return
+
+    bname, bcenter, bmove, br, ba = blocked[0]
+    print(f'\n【3】★ 对照组：往**受阻的「{bname}」**方向走（那里 {br:.3f} m 有东西）—— 守卫**该**拦')
+    node.call(node.safety_release)
+    node.call(node.motor_resume)
+    node.wait_until(lambda: node.mstat(I_STATE) in (STATE_OK, STATE_NO_CMD), timeout=8.0)
+    with node._lock:
+        node._reset()
+    req2 = MoveRelative.Request()
+    req2.x = float(bmove['x'])
+    req2.y = float(bmove['y'])
+    node.move_cli.call_async(req2)
+    got = node.wait_until(lambda: (node.sstat(0) or 0) > 0.5, timeout=6.0)
+    rep(f'★ 守卫拦住了「{bname}」方向', got, f'safety status[0]={node.sstat(0)}')
+    node.spin_for(1.2)
+    with node._lock:
+        node._reset()
+    spans3, smax3, rps3, rmax3 = node.phase(1.5)
+    print(f'    拦下后：{fmt(node, spans3, smax3, rps3, rmax3)}')
+    rep('★ 拦下后轮速指令归零', rmax3 < 1e-6, f'{rmax3:.4f}')
+
+    print()
+    print(f'  ⇒ 同一台车、同一次会话：「{name}」放行、「{bname}」拦下 —— 守卫是**有方向的**，')
+    print('     不是"一刀切"。一个什么都拦的守卫会被关掉，等于没有。')
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--phase', choices=['veto', 'guard'], required=True)
+    ap.add_argument('--phase', choices=['veto', 'guard', 'direction'], required=True)
     args = ap.parse_args()
 
     rclpy.init()
@@ -364,9 +465,9 @@ def main():
     try:
         print()
         print('=' * 74)
-        title = ('安全链架空验收 —— 结构性否决（D-037）'
-                 if args.phase == 'veto' else
-                 '安全链架空验收 —— 避障停车（D-036）')
+        title = {'veto': '安全链架空验收 —— 结构性否决（D-037）',
+                 'guard': '安全链架空验收 —— 避障停车（D-036）',
+                 'direction': '安全链架空验收 —— 守卫的**方向性**（D-036）'}[args.phase]
         print(f'  {title}（四轮离地）')
         print('=' * 74)
         print()
@@ -375,8 +476,10 @@ def main():
 
         if args.phase == 'veto':
             phase_veto(node, rep)
-        else:
+        elif args.phase == 'guard':
             phase_guard(node, rep)
+        else:
+            phase_direction(node, rep)
 
         print()
         print('=' * 74)
