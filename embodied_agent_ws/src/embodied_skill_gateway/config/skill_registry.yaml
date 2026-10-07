@@ -10,6 +10,11 @@
 #
 # ⚠️ `allowed_principals` 是 D-003「Agent 不得触达控制技能」**唯一**能真正执行的地方。
 #    所以 control.* 一律**不含** `agent.planner` —— 这不是疏漏，是那条架构红线本身。
+#    而 task-tier（Autonomous / Semantic）**应当**允许 `agent.planner` ——
+#    那正是 D-003 说的"Agent 可以命名的那一层"。
+#
+# ⚠️ `causes_motion` 决定 `allow_motion` 闸门管不管它（D-033），默认 **true**（保守）：
+#    漏写一个字段 = 少一道闸门，所以默认往安全一侧倒。只读查询显式写 false。
 
 skills:
 
@@ -21,6 +26,7 @@ skills:
     srv_type: embodied_skills_interfaces/MoveRelative
     timeout_s: 15.0          # Control Skill 最长约 1.0 m / 0.15 m/s ≈ 6.7 s，留足余量
     cancel_target: /control_skills/stop
+    causes_motion: true
     allowed_principals:
       - router.deterministic   # D-006 的本地确定性解析器
       - operator.manual        # 人工/验收工装
@@ -43,6 +49,7 @@ skills:
     srv_type: embodied_skills_interfaces/Rotate
     timeout_s: 15.0          # 最长约 π / 0.40 rad/s ≈ 7.9 s
     cancel_target: /control_skills/stop
+    causes_motion: true
     allowed_principals:
       - router.deterministic
       - operator.manual
@@ -60,6 +67,10 @@ skills:
     allowed_principals:
       - router.deterministic
       - operator.manual
+    # ⚠️ 刻意是 **false**：让车**停**不需要先"允许移动"。
+    #    否则一旦 allow_motion 关了，连停都发不出去 —— 那是把安全动作一起锁掉了。
+    #    它本身也不会让车动（只是把速度置零）。
+    causes_motion: false
 
   primitive.sector_min_range:
     tier: primitive
@@ -68,6 +79,7 @@ skills:
     target: /lidar_driver/sector_min_range
     srv_type: embodied_skills_interfaces/SectorMinRange
     timeout_s: 5.0
+    causes_motion: false     # 只读查询，不碰执行器
     allowed_principals:
       # 只读查询不碰执行器，所以 Agent 允许调用 —— Permission 是**按技能**的策略，
       # 不是"一律不给 Agent"的一刀切。
@@ -87,6 +99,7 @@ skills:
     target: /lidar_driver/path_clear
     srv_type: embodied_skills_interfaces/PathClear
     timeout_s: 5.0
+    causes_motion: false     # 只读查询，不碰执行器
     allowed_principals:
       - agent.planner
       - router.deterministic
@@ -94,3 +107,30 @@ skills:
     params:
       - {name: width, type: float, unit: 'rad', min: 0.0, max: 6.283185307179586}
       - {name: clear_range, type: float, unit: 'm', min: 0.0, max: 25.0}
+
+  # ---------- task-tier（Autonomous Skill）----------
+  # ⚠️ 与上面几类的**结构性差别**：它的终态由**技能自己报**（ARRIVED / BLOCKED / …），
+  #    因为只有它知道"是走到了"还是"被挡了"。网关负责**校验那个词**合法（D-032）。
+  #    它也**会唤醒 Agent**（task-tier 终态是唤醒集，D-004）—— control.* 不会。
+  autonomous.advance_until_blocked:
+    tier: task
+    description: 朝 +x 逐步前进，直到前方受阻或走满上限。**闭环**：每一步都重新问一次 LiDAR。
+    transport: service
+    target: /autonomous_skills/advance_until_blocked
+    srv_type: embodied_skills_interfaces/AdvanceUntilBlocked
+    # 它自己是一串运动 + 查询，比单个 control 原语长得多：
+    # 0.5 m / 0.15 m/s ≈ 3.3 s 的运动，加上每步的服务往返开销，留足余量。
+    # ⚠️ 超时太短会把一次**正常**的行走判成超时而取消 —— 那比慢更糟。
+    timeout_s: 45.0
+    cancel_target: /autonomous_skills/cancel
+    causes_motion: true
+    allowed_principals:
+      - agent.planner        # ★ task-tier **应当**允许 Agent 调用 —— 这是 D-003 的那一层
+      - operator.manual
+    params:
+      # ⚠️ 策略上限：比单次 move_relative 的 0.5 m 更严（它是"连续走"，风险叠加）。
+      - {name: max_distance, type: float, unit: 'm', min: 0.01, max: 0.5}
+      # ⚠️ 这个阈值**必须按部署环境实测标定**（D-028）：同一台车两次摆位，
+      #    近场回波占比在 3.6% 与 67% 之间摆动。拍一个数一定会被场地否决。
+      - {name: clear_range, type: float, unit: 'm', min: 0.1, max: 1.0}
+      - {name: step, type: float, unit: 'm', min: 0.02, max: 0.2}

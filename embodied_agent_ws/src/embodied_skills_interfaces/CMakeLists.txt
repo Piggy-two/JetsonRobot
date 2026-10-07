@@ -19,6 +19,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SkillResult.srv"
   "srv/SkillCancel.srv"
   "srv/SkillList.srv"
+  "srv/AgentTask.srv"
+  "srv/AdvanceUntilBlocked.srv"
   "msg/SkillEvent.msg"
   DEPENDENCIES builtin_interfaces
 )

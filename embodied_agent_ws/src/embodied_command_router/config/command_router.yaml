@@ -13,6 +13,11 @@ command_router:
     # 安全词转发目标。⚠️ Safety Runtime 有独立零速通道，这里是转发不是兜底。
     estop_service: /safety_runtime/estop
 
+    # 复杂任务（Agent Task）的转发目标。**路由器不判断"能不能做"** ——
+    # 那是 Agent 层的事（D-006 的分工）。今天 Agent 的 Planner 是 stub，
+    # 所以复杂任务仍会被拒绝，但拒绝是**从 Agent 层发出的**。
+    agent_service: /agent_runtime/submit
+
     # 受理之后最多等多久终态事件。超了就报"结果未知"，**不当成已完成**。
     result_timeout: 30.0
 

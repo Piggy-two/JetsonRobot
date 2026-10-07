@@ -1,0 +1,47 @@
+agent_runtime:
+  ros__parameters:
+    # Skill 网关（唯一准入点）。本节点**不直接调技能服务**。
+    gateway_service: /skill_gateway/invoke
+    gateway_cancel_service: /skill_gateway/cancel
+
+    # 任务级事件。⚠️ 只有 task-tier 终态会唤醒本节点；control-tier 的 FINISHED 不会。
+    event_topic: /embodied/skill/events
+    status_topic: /embodied/agent/status
+
+    # 注册表文件。留空 = 用 embodied_skill_gateway 包 share 目录下那份。
+    # ⚠️ **读同一份数据**，不另抄技能名单 —— 抄一份就会漂移（D-029）。
+    registry_file: ''
+
+    # 规则表文件（YAML）。留空 = **空表**。
+    #
+    # ⚠️ **默认空表** ⇒ 任何自然语言任务都会被明确拒绝
+    # （「需要 LLM 规划，当前未实现（Phase 7）」）。**这是刻意的**，不是缺陷。
+    #
+    # 这是 Phase 7 那张 Rule Engine 的占位：它让"查表 → 调技能"这条**链路**
+    # 今天就能被端到端跑通与验证，而不必先有一个 LLM。接 LLM 时替换的是
+    # **这张表的内容**，不是这条链路。格式见同目录 `rules_example.yaml`。
+    #
+    # 🔒 表里**只能**写 task-tier 技能（Autonomous / Semantic）。写了 control.*
+    #    会被 planner 拒绝并说明原因（D-003 的架构红线，代码级校验）。
+    #
+    # ⚠️ 为什么是**文件**而不是命令行参数：`ros2 launch ... rules_json:='{...}'`
+    #    会被 launch 当成 YAML 解析成 dict，参数系统直接拒收
+    #    （`Allowed value types are ... Got <class 'dict'>`）。规则表本来就是数据。
+    rules_file: ''
+
+    # 在途任务表容量。满了会**拒绝**新任务（并去取消刚派发的那个），
+    # 而不是丢掉还在等的任务、也不是无界增长（内存只有 7.4 GiB，#7）。
+    task_capacity: 100
+
+    # 有界记忆容量。**能被观测**：超出的条数会计入 status 的第 4 项。
+    memory_capacity: 200
+
+    # 等网关受理响应的上限。
+    service_wait_timeout: 3.0
+
+    # 超时兜底扫描频率。⚠️ deadline 用**单调钟**判定（#24 / DEV_NOTES 坑 13）。
+    sweep_rate: 5.0
+
+    # ⚠️ 三层闸门的第一层（D-033）。默认 false：本节点能**间接**让车动
+    #    （它派发 autonomous 技能），所以它也要有这一层。
+    allow_motion: false

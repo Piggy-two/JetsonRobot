@@ -28,6 +28,8 @@ D-005 的原文是「Tool / Skill 请求必须经过 Safety Gateway（Schema 校
 import json
 import math
 
+from embodied_skill_gateway import task_state as ts
+
 # 拒绝原因统一前缀，便于上层与日志一眼分辨"被策略拦下"与"技能自己失败"
 REJECT = 'REJECTED'
 
@@ -163,6 +165,33 @@ def validate_result(tier, success, elapsed, message=''):
     if not success and not str(message).strip():
         return False, '技能报告失败却没给原因 —— 空原因会让上层无法判断该重试还是该放弃'
     return False, None
+
+
+def validate_task_terminal(state):
+    """**task-tier** 技能自报的终态是否合法。返回原因字符串，或 None 表示通过。
+
+    这是 task-tier 的 Result Validation。与 control-tier 的关键差别：
+    control-tier 的终态由**网关**决定（`success` → `FINISHED`），
+    而 task-tier 的终态由**技能自己报**（`ARRIVED` / `BLOCKED` / …）——
+    因为只有技能知道"是走到了"还是"被挡了"。
+
+    于是这里必须**校验它报的那个词**：
+
+      · 必须是已知的、且是**终态**（报个 `RUNNING` 回来是无效的）；
+      · **不得是 `FINISHED`** —— 那是 control-tier 的词汇。
+        task-tier 用它，Agent 会因为 `FINISHED` **不唤醒**而永远 WAIT，
+        而且"技能返回了"被伪装成"任务结束了"（D-032）。
+    """
+    if not state:
+        return 'task-tier 技能必须自报终态（ARRIVED / BLOCKED / FAILED / …）'
+    if not ts.is_known(state):
+        return f'未知的状态名 {state!r}'
+    if not ts.is_terminal(state):
+        return f'{state} 不是终态 —— task-tier 返回时必须已到终态'
+    if state == ts.FINISHED:
+        return (f'{ts.FINISHED} 是 control-tier 的终态，task-tier 任务不得用它 '
+                f'（那等于用任务的词汇表撒谎，且不会唤醒 Agent，D-032）')
+    return None
 
 
 def format_reject(reason):

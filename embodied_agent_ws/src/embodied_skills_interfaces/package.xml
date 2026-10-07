@@ -9,7 +9,8 @@
     指令的**语义**（米 / 弧度、坐标系、正方向、有效性的边界）必须写在接口里，
     否则下游只能靠约定俗成。目前含：
       MoveRelative / Rotate（Control Skill）、SectorMinRange / PathClear（LiDAR Primitive）、
-      SkillInvoke / SkillResult / SkillCancel / SkillList + msg/SkillEvent（上层 Skill 网关，D-030/D-031）。
+      SkillInvoke / SkillResult / SkillCancel / SkillList + msg/SkillEvent（上层 Skill 网关，D-030/D-031）、
+      AgentTask（Agent Runtime 入口）、AdvanceUntilBlocked（第一个 task-tier / Autonomous 技能）。
   </description>
   <maintainer email="piggy@example.com">Piggy-two</maintainer>
   <license>Apache-2.0</license>

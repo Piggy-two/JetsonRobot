@@ -88,7 +88,8 @@ Jetson Orin（L4T R36.4.3 / JetPack 6.x）是中央计算节点，承担：
 | 语音识别 ASR | `xf_mic_asr_offline`（厂商离线 ASR） | ✅ 包已存在，❓ 待实机验收 |
 | **Skill Gateway + Registry** | `embodied_skill_gateway`（Overlay）：D-005 的六项检查 + **数据驱动的注册表** + 任务表与 8 状态机。🔒 **唯一被允许直接调用技能服务的进程** | ✅ 已实现（2026-10-07，D-029/D-030/D-031/D-032） |
 | **Hybrid Command Router** | `embodied_command_router`（Overlay）：安全词 / 确定性命令 / 复杂任务三分类 + 中文命令解析。安全词判定**复用** `estop.py` 的整句匹配 | ✅ 已实现（2026-10-07，D-006） |
-| Agent Runtime | Planner / Executor / Event Manager / Memory（**Skill Registry / Safety Gateway 已由上两行落地**） | 📋 第二批 |
+| **Agent Runtime** | `embodied_agent_runtime`（Overlay）：**Executor**（WAIT 推进 / 超时 / 唤醒判定）+ **Event Manager** + **Memory**（有界）。⚠️ **Planner 是 stub**（规则表查表，默认空 ⇒ 拒绝一切），LLM 规划与重规划属 Phase 7 | ⚠️ 骨架已实现（2026-10-07，D-035）；**未真机验证** |
+| **Autonomous Skill** | `embodied_autonomous_skills`（Overlay）：第一个 task-tier 技能 `advance_until_blocked` —— **闭环**（每步重新问 LiDAR） | ⚠️ 已实现（2026-10-07，D-034）；**未真机验证**，受 `allow_motion` 闸门约束 |
 | 本地轻量 LLM | 后期加入，用于简单语言理解 / Tool Calling / 离线模式 | 📋 第一版不做 |
 | 云端 LLM 调用 | 复杂任务规划、多步骤推理、异常处理 | 📋 |
 | TensorRT 视觉推理 | GStreamer → CUDA → TensorRT → YOLO → Tracker | 📋 |
@@ -129,9 +130,12 @@ Hardware
 > Skill Manager`，把 **Registry 画成了一个并列的跳**。实际上 Registry 是 **Gateway 查的数据** ——
 > "有哪些技能、参数边界是多少、谁能调"是对着它查的，它本身不承担任何控制流。
 >
-> 📌 **已落地的部分（2026-10-07）**：`embodied_skill_gateway`（Skill Gateway + 注册表 + 任务表）
-> 与 `embodied_command_router`（Hybrid Command Router，§7）。
-> `Agent Runtime` 与 `Skill Manager` 的独立进程形态仍是设计。详见 **D-029 / D-030 / D-031**。
+> 📌 **已落地的部分（2026-10-07）**：`embodied_skill_gateway`（Skill Gateway + 注册表 + 任务表）、
+> `embodied_command_router`（Hybrid Command Router，§7）、
+> `embodied_agent_runtime`（**Executor / Event Manager / Memory**；Planner 是 stub）、
+> `embodied_autonomous_skills`（第一个 task-tier 技能）。
+> **Skill Manager 的独立进程形态仍是设计**（第一版与 Gateway 同进程，D-029 决策 4）。
+> 详见 **D-029 / D-030 / D-031 / D-032 / D-034 / D-035**。
 
 ### 5.2 自下而上的反馈流
 
@@ -251,7 +255,9 @@ Safety > Control > Skill > Agent
 
 > 📌 **已落地（2026-10-07）**：`embodied_command_router` 实现上面这张表的分流；
 > B 类**多走一跳 Skill Gateway**（D-029/D-031：所有动作必须过六项检查，没有旁路）。
-> C 类**当前明确拒绝**（需要 Agent 规划，Phase 7 未实现）—— 不假装听懂。
+> C 类**转给 `embodied_agent_runtime`**，由它回答"能不能做"—— 路由器只负责分类（D-035）。
+> 而 Agent Runtime 的 Planner 是 **stub**（规则表默认空），所以 C 类**今天仍然会被拒绝**，
+> 但拒绝是**从 Agent 层发出的**，理由写清了是 Phase 7 未到。
 >
 > ⚠️ **`停止追踪` 不是安全词**：判定用**整句匹配**（`embodied_safety_runtime/estop.py`），
 > 子串匹配会让厂商词表里的 `停止追踪` / `停止分拣` 全部误触发整机急停。

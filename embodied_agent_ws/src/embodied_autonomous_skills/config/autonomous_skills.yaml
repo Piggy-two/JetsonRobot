@@ -1,0 +1,22 @@
+autonomous_skills:
+  ros__parameters:
+    # 看：前方查询。**只读**，不产生任何运动。
+    path_clear_service: /lidar_driver/path_clear
+
+    # 动：迈步。⚠️ 本技能直接调下层服务是 **Skill 组合**，不是绕过准入 ——
+    # 本技能自己是被注册、过了六项检查才被派发的（见 D-034）。
+    move_service: /control_skills/move_relative
+
+    # 取消时要停掉正在进行的子动作。**不"只把等待标记为放弃"**（D-030）。
+    stop_service: /control_skills/stop
+
+    # 等服务可用的上限。
+    service_wait_timeout: 3.0
+
+    # 单次子调用（一次查询 / 一步运动）的上限。⚠️ 单调钟计时（#24）。
+    sub_call_timeout: 12.0
+
+    # 前方扇区全宽（弧度）。pi/3 ≈ 1.0472 表示前方 ±30°，
+    # 与 LiDAR Primitive 的默认口径一致。
+    # ⚠️ 换口径就等于换"什么算挡路"，必须与现场标定的 clear_range 一起改。
+    sector_width: 1.0471975511965976

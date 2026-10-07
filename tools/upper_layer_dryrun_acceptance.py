@@ -20,11 +20,15 @@ Motor Driver 默认 `dry_run=true`：它**不向 `/cmd_vel` 发布任何东西**
     ❌ **不**证明车真的会走到那个位置（那是真机测试的事，需要解冻）
 
 前置（全部已启动）：
-    embodied_motor_driver    (dry_run=true)
+    embodied_motor_driver        (dry_run=true)
     embodied_control_skills
-    embodied_skill_gateway   (allow_motion:=true)
-    embodied_command_router  (allow_motion:=true)
+    embodied_lidar_driver
+    embodied_skill_gateway       (allow_motion:=true)
+    embodied_command_router      (allow_motion:=true)
     embodied_safety_runtime
+    embodied_autonomous_skills
+    embodied_agent_runtime       (allow_motion:=true,
+                                  rules_json 里要有 '向前走一小段' 那条规则)
 
 用法：
     source /opt/ros/humble/setup.bash
@@ -46,14 +50,17 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from embodied_skills_interfaces.msg import SkillEvent
-from embodied_skills_interfaces.srv import SkillInvoke
+from embodied_skills_interfaces.srv import AgentTask, SkillInvoke
+from std_msgs.msg import Float64MultiArray
 
 TEXT_TOPIC = '/embodied/command/text'
 DRYRUN_TOPIC = '/embodied/motor/cmd_vel_dryrun'
 SAFETY_EVENTS = '/embodied/safety/events'
 ESTOP_RELEASE = '/safety_runtime/release'
 SKILL_EVENTS = '/embodied/skill/events'
+AGENT_STATUS = '/embodied/agent/status'
 INVOKE = '/skill_gateway/invoke'
+AGENT_SUBMIT = '/agent_runtime/submit'
 
 # 会结束一条命令的终态
 TERMINAL = frozenset({'ARRIVED', 'TARGET_FOUND', 'TARGET_LOST', 'BLOCKED',
@@ -74,9 +81,35 @@ class DryRunIntegrator(Node):
         self._release_cli = self.create_client(Trigger, ESTOP_RELEASE)
         self._resume_cli = self.create_client(Trigger, '/motor_driver/resume')
         self._invoke_cli = self.create_client(SkillInvoke, INVOKE)
+        self._agent_cli = self.create_client(AgentTask, AGENT_SUBMIT)
+        self.create_subscription(Float64MultiArray, AGENT_STATUS,
+                                 self._on_agent_status, 10)
         self.safety_events = []
         self.terminal_by_task = {}     # task_id -> [SkillEvent, ...]
         self.all_skill_events = []
+        self.agent_status = []
+
+    def _on_agent_status(self, m):
+        # [在途任务数, 仍在等, 被唤醒次数, 被丢弃的历史条数]
+        self.agent_status.append(list(m.data))
+
+    def agent_wakeups(self):
+        """Agent Runtime 自报的"被唤醒次数"。**这是"事件确实唤醒了 Agent"的活体证据。**"""
+        return self.agent_status[-1][2] if self.agent_status else None
+
+    def submit_agent_task(self, text, timeout_s=5.0):
+        """提交一条自然语言任务给 Agent Runtime。返回响应或 None。"""
+        if not self._agent_cli.wait_for_service(timeout_sec=3.0):
+            return None
+        req = AgentTask.Request()
+        req.text = text
+        req.principal = 'acceptance'
+        req.request_id = 'acceptance'
+        fut = self._agent_cli.call_async(req)
+        end = time.monotonic() + timeout_s
+        while not fut.done() and time.monotonic() < end:
+            rclpy.spin_once(self, timeout_sec=0.02)
+        return fut.result() if fut.done() else None
 
     def _on_skill_event(self, m):
         self.all_skill_events.append(m)
@@ -147,6 +180,27 @@ class DryRunIntegrator(Node):
             rclpy.spin_once(self, timeout_sec=0.02)
         return self.snapshot()
 
+    def wait_for_traffic(self, min_frames=15, timeout_s=10.0):
+        """预热：等到干跑速度流**真的在往这里送帧**为止。
+
+        ⚠️ 为什么必须有这一步：不预热的话，"**我没在看**"和"**系统没动**"
+        在输出上**完全一样**（都是 ∫vx = 0、非零帧 0）。这个工装第一版就踩过 ——
+        一次运行里它一帧都没收到，却被当成"车没动"，白白怀疑了系统一轮。
+
+        :return: 实际收到多少帧（0 表示一直没流量 —— 那是环境问题，不是被测对象）
+        """
+        with self._lock:
+            self._reset()
+        end = time.monotonic() + timeout_s
+        last = 0
+        while time.monotonic() < end:
+            rclpy.spin_once(self, timeout_sec=0.05)
+            with self._lock:
+                if self.frames >= min_frames:
+                    return self.frames
+                last = self.frames
+        return last
+
     def idle(self, seconds):
         with self._lock:
             self._reset()
@@ -177,8 +231,16 @@ class DryRunIntegrator(Node):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description='上层干跑端到端验收')
+    ap.add_argument('--advance-distance', type=float, default=0.3,
+                    help='【12】里那条规则表的 max_distance（米）。'
+                         '⚠️ 必须与 rules_file 里写的一致，否则那条断言没有意义')
+    args = ap.parse_args()
+
     rclpy.init()
     node = DryRunIntegrator()
+    node.advance_distance = args.advance_distance
     ok = True
     results = []
 
@@ -195,8 +257,15 @@ def main():
         print('=' * 72)
         print()
 
-        # 预热：等订阅建立
-        node.idle(1.5)
+        # 预热：确认干跑速度流**真的在往这里送帧**。
+        # ⚠️ 不确认的话，后面所有"非零帧数 = 0"的断言都可能只是"我没在看"。
+        got = node.wait_for_traffic()
+        print(f'  [预热] 干跑速度流：收到 {got} 帧'
+              f'{"（正常）" if got >= 15 else "  ⚠️ 迟迟没有流量 —— 后面的判读不可信"}')
+        if got < 15:
+            print('  ⚠️ 检查：Motor Driver 在跑吗？dry_run 是 true 吗？')
+        node.idle(0.5)
+        print()
 
         print('【基线】空闲 2 s（应当没有任何非零速度）')
         x, y, w, nz, fr = node.idle(2.0)
@@ -292,6 +361,75 @@ def main():
         node.idle(1.5)
         check('拒绝路径不产生事件', len(node.all_skill_events) == n_before,
               f'新增 {len(node.all_skill_events) - n_before} 个事件')
+        print()
+
+        print('【11】Agent Runtime：**未匹配**的复杂任务应被拒绝，且理由写明是 Phase 7')
+        res = node.submit_agent_task('把这个房间彻底打扫一遍')
+        if res is None:
+            check('Agent Runtime 可用', False, '提交服务没有响应（没在跑？）')
+        else:
+            check('明确拒绝而不是含糊接受', res.accepted is False,
+                  f'accepted={res.accepted}')
+            check('理由写清了是缺 LLM', 'Phase 7' in res.message,
+                  f'message={res.message!r}')
+        print()
+
+        print('【12】task-tier 端到端：规则表命中的任务 → Autonomous 技能 → 唤醒 Agent')
+        print('     （规则表：\'向前走一小段\' → autonomous.advance_until_blocked）')
+        wake_before = node.agent_wakeups()
+        node.idle(0.5)
+        with node._lock:
+            node._reset()
+        res = node.submit_agent_task('向前走一小段')
+        if res is None or not res.accepted:
+            check('Agent 受理了这条任务', False,
+                  f'{getattr(res, "message", "无响应")}')
+        else:
+            print(f'    受理 {res.task_id}：{res.message}')
+            events = node.wait_terminal(res.task_id, 40.0)
+            # ⚠️ 把"这段时间到底收到多少帧"打出来。少了就说明**工装自己没在看**，
+            #    而不是系统没动 —— 没有这个数，两种情况在输出上长得一模一样。
+            _fx, _fy, _fw, _fnz, _ffr = node.snapshot()
+            print(f'    （等终态期间收到 {_ffr} 帧，非零 {_fnz} 帧）')
+            states = [e.state for e in events]
+            print(f'    终态事件：{states or "（一个都没来）"}')
+            check('task-tier 走完了并产生终态', len(events) >= 1, f'{states}')
+
+            for e in events:
+                print(f'      事件：state={e.state} verified={e.verified} '
+                      f'progress={e.progress}')
+            if events:
+                ev = events[0]
+                check('终态是 **task-tier** 词汇（不是 control 的 FINISHED）',
+                      ev.state != 'FINISHED' and ev.state in
+                      ('ARRIVED', 'BLOCKED', 'FAILED', 'CANCELLED'),
+                      f'state={ev.state}')
+                check('仍标 verified=false（无独立反馈）', ev.verified is False,
+                      f'verified={ev.verified}')
+
+            node.idle(1.0)
+            wake_after = node.agent_wakeups()
+            check('★ Agent 被**唤醒**了（task-tier 终态才唤醒）',
+                  wake_after is not None and wake_before is not None
+                  and wake_after > wake_before,
+                  f'唤醒次数 {wake_before} → {wake_after}')
+
+            # ⚠️ 用**等终态期间**的那份积分（`_fx`），不是"再等 1 s"之后的 ——
+            #    后者会把静止段也算进来，掩盖"走路期间根本没收到帧"这种情况。
+            x = _fx
+            print(f'    走路期间 ∫vx = {x:+.4f} m（{_ffr} 帧，非零 {_fnz}）')
+            if _ffr == 0:
+                check('工装确实看到了干跑速度流', False,
+                      '**一帧都没收到** —— 这是工装/订阅的问题，不是系统没动')
+            elif events and events[0].state == 'ARRIVED':
+                check(f'ARRIVED ⟹ 积分 ≈ 请求的 {node.advance_distance} m',
+                      abs(x - node.advance_distance) < 0.03,
+                      f'∫vx = {x:+.4f} m（非零帧 {_fnz}）')
+            else:
+                # BLOCKED / FAILED 也是**合法结果**（场地与雷达说了算），
+                # 但那必须伴随**没有走** —— 不能"报受阻却动了"。
+                check('非 ARRIVED ⟹ 没有前进',
+                      abs(x) < 0.03, f'∫vx = {x:+.4f} m')
         print()
 
         # 收尾：再解一次，确保不把系统留在锁存状态（幂等）

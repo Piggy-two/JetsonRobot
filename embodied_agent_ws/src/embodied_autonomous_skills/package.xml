@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_autonomous_skills</name>
+  <version>0.1.0</version>
+  <description>
+    JetsonRobot Overlay Autonomous Skill 层（架构分层中的 Autonomous Skill）。
+    第一个技能是 `advance_until_blocked`：朝 +x 逐步前进，直到前方受阻或走满上限。
+
+    与 Control Skill 的分界就是**闭环**：Control Skill 按时间发速度、发完即返，不看不问；
+    本技能每一步都重新问一次 LiDAR（`path_clear`），再决定要不要迈下一步。
+    ⇒ 它因此进 **8 状态机**（task-tier），终态是 ARRIVED / BLOCKED / FAILED / CANCELLED，
+      而不是 control-tier 的 FINISHED（D-032）。
+
+    ⚠️ **本技能未在真机上验证过** —— LiDAR 是真的，但运动是 dry-run 的。
+       受网关 `allow_motion` 闸门约束（D-033）。
+
+    ⚠️ 「不知道 ≠ 受阻」：扫描陈旧时 `path_clear` 返回 `clear=false, range=-1`，
+       那是**雷达没数据**，不是**前方有障碍**。两者报不同的终态（FAILED vs BLOCKED），
+       否则排查方向会完全跑偏（去挪障碍物，而其实该查雷达）。见 D-028。
+
+    ⚠️ **阈值必须按部署环境实测标定**：同一台车两次摆位，近场回波占比在 3.6% 与 67%
+       之间摆动（D-028），任何"拍出来"的 clear_range 都会被场地否决。
+
+    边界说明：本技能在**自己的实现内部**直接调下层服务（`/lidar_driver/*`、
+    `/control_skills/*`）—— 这是 Skill 组合。D-029 的"只有网关能调技能服务"
+    管的是 **Agent / 命令侧不得绕过准入**，见 D-034。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>embodied_skills_interfaces</depend>
+  <!-- 终态常量取自网关的 task_state（D-029：状态机的 canonical 模块在网关），
+       保证全项目只有一处定义，不会各写各的字面量 -->
+  <depend>embodied_skill_gateway</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

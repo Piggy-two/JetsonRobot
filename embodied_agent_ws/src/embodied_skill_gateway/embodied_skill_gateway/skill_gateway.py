@@ -62,7 +62,7 @@ from std_srvs.srv import Trigger
 
 from embodied_skills_interfaces.msg import SkillEvent
 from embodied_skills_interfaces.srv import (
-    MoveRelative, PathClear, Rotate, SectorMinRange,
+    AdvanceUntilBlocked, MoveRelative, PathClear, Rotate, SectorMinRange,
     SkillCancel, SkillInvoke, SkillList, SkillResult)
 
 from embodied_skill_gateway import checks, task_state
@@ -76,6 +76,7 @@ _SRV_TYPES = {
     'embodied_skills_interfaces/Rotate': Rotate,
     'embodied_skills_interfaces/SectorMinRange': SectorMinRange,
     'embodied_skills_interfaces/PathClear': PathClear,
+    'embodied_skills_interfaces/AdvanceUntilBlocked': AdvanceUntilBlocked,
     'std_srvs/Trigger': Trigger,
 }
 
@@ -174,8 +175,10 @@ class SkillGateway(Node):
 
         spec = result.spec
 
-        # ⚠️ 第一层闸门：不派发会动的技能。
-        if spec.tier == 'control' and not self.get_parameter('allow_motion').value:
+        # ⚠️ 第一层闸门：不派发**会动**的技能（D-033）。
+        #    判据是注册表里的 `causes_motion`，**不是**层级 —— Autonomous Skill
+        #    也会让车动，只看 `tier == 'control'` 会把它们漏过去。
+        if spec.causes_motion and not self.get_parameter('allow_motion').value:
             res.accepted = False
             res.message = (checks.format_reject(
                 f'allow_motion=false —— 拒绝派发可能引起运动的技能 {spec.name}'
@@ -335,7 +338,17 @@ class SkillGateway(Node):
             self._finish(rec, task_state.FAILED, f'结果不自洽：{problem}')
             return
 
-        if success:
+        if spec.tier == 'task':
+            # **task-tier 的终态由技能自己报**（只有它知道"是走到了"还是"被挡了"），
+            # 网关的职责是**校验它报的那个词**合法（D-032）。
+            state = str(getattr(response, 'state', ''))
+            why = checks.validate_task_terminal(state)
+            if why is not None:
+                self._finish(rec, task_state.FAILED,
+                             f'技能自报的终态不合法：{why}', payload)
+                return
+            self._finish(rec, state, message or '技能返回', payload, verified)
+        elif success:
             self._finish(rec, task_state.FINISHED, message or '技能返回',
                          payload, verified)
         else:

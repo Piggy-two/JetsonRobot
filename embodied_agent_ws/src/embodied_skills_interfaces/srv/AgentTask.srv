@@ -1,0 +1,22 @@
+# 把一条**自然语言任务**交给 Agent Runtime（D-006 的 C 类：Agent Task）。
+#
+# 与 `SkillInvoke` 的分工（**别混**）：
+#   · `SkillInvoke`  —— 「**执行**这个技能，参数是这些」。调用方已经知道要调什么。
+#   · `AgentTask`    —— 「**理解并规划**这句话」。调用方（命令路由器）故意不知道要调什么，
+#                       那正是这一层存在的理由。
+#
+# ⚠️ 本版 Agent Runtime 的 Planner 是 **stub**：它按一张**规则表**（`rules_json`）查表，
+#    查不到就**明确拒绝**（Phase 7 才有 LLM 规划）。所以今天绝大多数自然语言任务
+#    得到的回答是"需要 LLM 规划，当前未实现" —— **这是刻意的，不是缺陷**。
+#
+# 🔒 架构红线（D-003 / D-029）：这一层**只能**命名 **task-tier** 技能
+#    （Autonomous / Semantic）。规则表里写 control 技能会被**拒绝** ——
+#    这条在 planner 里是代码级校验，不是约定。
+
+string text           # 自然语言任务，例如「去桌子旁边找杯子」
+string principal      # 调用方身份。约定 'router.agent_task'（命令路由器转发）、'operator.manual'
+string request_id     # 可选，用于日志串联
+---
+bool accepted         # 是否被接受并**开始规划**（今天几乎总是 false，因为 Planner 是 stub）
+string task_id        # 受理后用于跟踪；未受理则为空
+string message        # 中文说明。**拒绝时必须写清原因** —— 用户看到的就是这句

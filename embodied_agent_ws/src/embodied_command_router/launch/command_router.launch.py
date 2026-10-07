@@ -17,7 +17,8 @@
     ros2 topic pub --once /embodied/command/text std_msgs/msg/String "{data: '去桌子旁找杯子'}"
 
 预期：前两条 → 经网关到 Control Skill；`停下` → Safety Runtime 锁存急停；
-      最后一条 → **明确拒绝**（需要 Agent 规划，Phase 7 未实现）。
+      最后一条 → 转给 **Agent Runtime**，由它回答"需要 LLM 规划，Phase 7 未实现"
+      （路由器**不替 Agent 判断"能不能做"**）。
       `向前走 0.5`（缺单位）→ 拒绝，**不猜**。
 
 ⚠️ **一次只处理一条命令**，忙时**拒绝**而不是排队（与 D-026 决策 2 同一理由）。

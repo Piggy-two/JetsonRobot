@@ -92,11 +92,12 @@ class SkillSpec:
 
     __slots__ = ('name', 'tier', 'description', 'transport', 'target', 'srv_type',
                  'params', 'timeout_s', 'allowed_principals', 'cancel_target',
-                 'available', 'unavailable_reason', 'max_norm')
+                 'available', 'unavailable_reason', 'max_norm', 'causes_motion')
 
     def __init__(self, name, tier, target, srv_type, params=(), timeout_s=10.0,
                  allowed_principals=(), cancel_target=None, transport='service',
-                 description='', available=True, unavailable_reason='', max_norm=None):
+                 description='', available=True, unavailable_reason='', max_norm=None,
+                 causes_motion=True):
         if tier not in TIERS:
             raise RegistryError(f'技能 {name}：未知层级 {tier!r}（支持 {TIERS}）')
         if not target:
@@ -121,6 +122,11 @@ class SkillSpec:
         self.cancel_target = cancel_target
         self.available = bool(available)
         self.unavailable_reason = unavailable_reason
+        # ⚠️ **默认 True（保守）**：忘记声明的技能会被当成"会动"，
+        #    于是照样受 `allow_motion` 闸门约束。反过来默认 False 的话，
+        #    漏写一个字段就等于悄悄开了一道"不受闸门约束"的口子。
+        #    只读查询（`primitive.*`）在 YAML 里显式写 `causes_motion: false`。
+        self.causes_motion = bool(causes_motion)
 
         seen = set()
         for p in self.params:
@@ -168,6 +174,7 @@ class SkillSpec:
                 available=d.get('available', True),
                 unavailable_reason=d.get('unavailable_reason', ''),
                 max_norm=d.get('max_norm'),
+                causes_motion=d.get('causes_motion', True),
             )
         except KeyError as e:
             raise RegistryError(f'技能 {name}：缺少必填字段 {e}') from None
@@ -197,6 +204,7 @@ class SkillSpec:
                 for p in self.params
             ],
             'max_norm': self.max_norm,
+            'causes_motion': self.causes_motion,
         }
 
     def __repr__(self):

@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_agent_runtime</name>
+  <version>0.1.0</version>
+  <description>
+    JetsonRobot Agent Runtime（第一批骨架）。
+    按 D-001 的命名约束：进程叫 `agent_runtime`，「Agent」一词指**整机**。
+
+    已实现：**Executor**（WAIT 推进 / 超时 / 唤醒判定）、**Event Manager**（订阅事件）、
+           **Memory**（有界历史，理由见 memory.py：本机内存只有 7.4 GiB，#7）。
+    未实现：**Planner 是 stub**（按规则表查表，查不到就拒绝）、LLM 规划与重规划（Phase 7）。
+
+    D-004 的两条语义在这里落地：
+      ① **WAIT 不阻塞** —— 受理后记一笔就返回事件循环，没有任何地方在"等"。
+         用阻塞等待实现 WAIT 会让 Agent 变成不可取消、不可超时的单线程。
+      ② **只有任务级事件唤醒 Agent** —— control-tier 的 `FINISHED` **不唤醒**，
+         它只表示"技能返回了"，不等于"任务结束了"。
+
+    ⚠️ 超时 = **取消 + 终态**（D-030），不是"不再等了"：超时后本节点会去调网关的
+       `~/cancel`，让它真的把技能停掉。
+
+    ⚠️ 规则表**默认空** ⇒ 任何自然语言任务都被明确拒绝（需要 LLM 规划）。
+       这是刻意的默认值，不是缺陷。
+
+    ⚠️ **未在真机上验证过**（车从未被这条链路驱动过），受 `allow_motion` 闸门约束（D-033）。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>embodied_skills_interfaces</depend>
+  <!-- 状态机的 canonical 模块与技能的注册表都在网关（D-029）：
+       Agent 读**同一份数据**，而不是再抄一份技能名单（抄一份就会漂移） -->
+  <depend>embodied_skill_gateway</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

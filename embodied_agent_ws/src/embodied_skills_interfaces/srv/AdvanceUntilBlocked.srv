@@ -1,0 +1,30 @@
+# **第一个 task-tier（Autonomous）技能**：朝机体 +x 逐步前进，直到前方有障碍或走满上限。
+#
+# 为什么它算 Autonomous 而不是 Control（D-026 / D-032 的判据）：
+#   · Control Skill 是**开环**的 —— "按时间发速度，发完就返回"，它不看不问。
+#   · 本技能是**闭环**的 —— 每一步都重新问一次 LiDAR"前面通不通"，再决定要不要迈下一步。
+#   这正是 D-026 说的"有反馈之后再谈"的那类东西。
+#
+# ⚠️ 它因此**进 8 状态机**（plan.md §21），终态是 ARRIVED / BLOCKED / FAILED / CANCELLED ——
+#    而不是 control-tier 的 FINISHED。
+#
+# ⚠️ **阈值必须按部署环境实测标定**（D-028）：同一台车两次摆位，近场回波占比在
+#    **3.6% 与 67%** 之间摆动。任何"拍出来"的 `clear_range` 都会被场地否决。
+#
+# ⚠️ 本技能**未在真机上验证过**（车未动）。它受网关 `allow_motion` 闸门约束（D-033）。
+
+float64 max_distance    # 本次最多前进多少米。硬上限，必须 > 0 且不超过网关的策略上限。
+float64 clear_range     # 前方这个距离内有回波就判为受阻（米）。**必须实测标定**。
+float64 step            # 单步前进距离（米）。越小越平滑，但每一步都要重新判定。
+---
+bool success
+string state            # **必须是 task-tier 终态之一**：
+                        #   ARRIVED —— 走满了 max_distance
+                        #   BLOCKED —— 前方受阻，停在半路
+                        #   FAILED  —— 出错了（底层不可用等）
+                        #   CANCELLED —— 被取消
+                        # ⚠️ 网关会**校验**它是合法的 task-tier 终态；写 control-tier 的
+                        #    FINISHED 会被拒绝 —— 那等于用任务的词汇表撒谎。
+string message          # 人类可读说明（中文）
+float64 elapsed         # 耗时（秒，单调钟）
+float64 travelled       # **自报**前进距离（开环积分，未经独立校验）

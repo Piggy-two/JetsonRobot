@@ -1,0 +1,32 @@
+# Agent Runtime 的**规则表**示例 —— Phase 7 那张 Rule Engine 的占位。
+#
+# ⚠️ **这不是默认配置。** 默认 `rules_file` 是空的，于是任何自然语言任务都会被
+#    **明确拒绝**（「需要 LLM 规划，当前未实现（Phase 7）」）。那是刻意的。
+#
+# 用法：
+#     ros2 launch embodied_agent_runtime agent_runtime.launch.py \
+#         rules_file:=<这份文件的绝对路径> allow_motion:=true
+#
+# 它存在的意义：让"查表 → 网关 → task-tier 技能 → 事件 → 唤醒 Agent"这条**链路**
+# 今天就能被端到端跑通与验证，不必先有一个 LLM。接 LLM 时替换的是**表的内容**，
+# 不是这条链路。
+#
+# 🔒 **表里只能写 task-tier 技能**（Autonomous / Semantic）。
+#    写了 `control.*` 会被 planner **拒绝并说明原因** —— 那是 D-003 的架构红线，
+#    在代码里校验，不是靠自觉。理由：这张表将来是 LLM 填的，
+#    没有校验的话，一条"顺手"的规则就能让 Agent 绕过准入，而且**没有任何地方会报错**。
+#
+# ⚠️ 键是**归一化后**的文本（去空白与标点、转小写），所以要写「向前走一小段」
+#    而不是「向前走一小段！」
+
+rules:
+
+  # 端到端验收用的那条（`tools/upper_layer_dryrun_acceptance.py` 的【12】用它）。
+  # ⚠️ `clear_range` 必须按部署环境实测标定（D-028）：同一台车两次摆位，
+  #    近场回波占比在 3.6% 与 67% 之间摆动 —— 拍一个数会被场地否决。
+  向前走一小段:
+    skill: autonomous.advance_until_blocked
+    args:
+      max_distance: 0.2      # m，策略上限 0.5
+      clear_range: 0.25      # m，**必须实测标定**
+      step: 0.1              # m，必须 ≤ max_distance

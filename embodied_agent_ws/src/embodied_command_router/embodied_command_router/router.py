@@ -11,10 +11,15 @@
     ↓         ↓              ↓              ↓
  安全词    确定性命令      复杂任务      厂商状态文本 / 解析不了
     ↓         ↓              ↓              ↓
-/estop   Skill 网关      明确拒绝        忽略 / 拒绝（不猜）
-  服务      ↓
-        Control Skill
+/estop   Skill 网关     Agent Runtime   忽略 / 拒绝（不猜）
+  服务      ↓             （今天几乎总是
+        Control Skill     回"需要 LLM 规划"）
 ```
+
+> **路由器只负责"这是哪一类"，不负责"能不能做"。** 复杂任务交给 Agent 层判断 ——
+> 在路由器里替它下结论，等于把 Agent 的职责抄一份到路由器里，两份迟早不一致。
+> 今天 Agent Runtime 的 Planner 是 stub（规则表默认为空），所以复杂任务
+> **仍然会被拒绝**，但拒绝是**从 Agent 层发出的**，理由写清了是 Phase 7 未到。
 
 三条设计要点
 ------------
@@ -57,7 +62,7 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from embodied_skills_interfaces.msg import SkillEvent
-from embodied_skills_interfaces.srv import SkillInvoke
+from embodied_skills_interfaces.srv import AgentTask, SkillInvoke
 
 from embodied_command_router import command_parser as cp
 
@@ -100,6 +105,7 @@ class CommandRouter(Node):
         self.declare_parameter('gateway_service', '/skill_gateway/invoke')
         self.declare_parameter('event_topic', '/embodied/skill/events')
         self.declare_parameter('estop_service', '/safety_runtime/estop')
+        self.declare_parameter('agent_service', '/agent_runtime/submit')
         self.declare_parameter('result_timeout', 30.0)
         self.declare_parameter('service_wait_timeout', 3.0)
         # ⚠️ 三层闸门里属于本节点的那一层（D-033）。默认 false：
@@ -128,6 +134,8 @@ class CommandRouter(Node):
                                              callback_group=self._evt_group)
         self._gw_cli = self.create_client(SkillInvoke, g('gateway_service'),
                                           callback_group=self._evt_group)
+        self._agent_cli = self.create_client(AgentTask, g('agent_service'),
+                                             callback_group=self._evt_group)
 
         self.get_logger().info(
             f'命令路由器启动 | 文本 <- {g("text_topic")} | 网关 -> {g("gateway_service")} '
@@ -152,7 +160,13 @@ class CommandRouter(Node):
             self._forward_estop(text)
             return
 
-        if parsed.kind in (cp.AGENT_TASK, cp.UNPARSED):
+        if parsed.kind == cp.AGENT_TASK:
+            # 复杂任务**交给 Agent 层判断**，而不是在路由器里替它下结论。
+            # 路由器只负责"这是哪一类"，"能不能做"是 Agent 的事（D-006 的分工）。
+            self._forward_agent_task(text)
+            return
+
+        if parsed.kind == cp.UNPARSED:
             self.get_logger().warn(f'拒绝 {text!r}：{parsed.note}')
             return
 
@@ -189,6 +203,38 @@ class CommandRouter(Node):
                 '（若 text_topic 就是语音话题，它自己也会收到并处理）')
             return
         self._estop_cli.call_async(Trigger.Request())
+
+    # ---------- 复杂任务 ----------
+
+    def _forward_agent_task(self, text):
+        """转发给 Agent Runtime。**本节点不判断"能不能做"** —— 那是 Agent 的事。
+
+        ⚠️ Agent Runtime 不在跑时，**要如实说"没人在处理"**，而不是假装拒绝了 ——
+        两者的含义完全不同：一个是"我不会"，一个是"没人听"。
+        """
+        if not self._agent_cli.service_is_ready():
+            self.get_logger().error(
+                f'Agent Runtime 不在跑 —— {text!r} 无人处理'
+                f'（本节点只负责分类，复杂任务归 Agent 层）')
+            return
+        req = AgentTask.Request()
+        req.text = text
+        req.principal = 'router.agent_task'
+        req.request_id = ''
+        fut = self._agent_cli.call_async(req)
+        fut.add_done_callback(lambda f: self._on_agent_reply(f, text))
+
+    def _on_agent_reply(self, future, text):
+        try:
+            res = future.result()
+        except Exception as e:                                   # noqa: BLE001
+            self.get_logger().error(f'调用 Agent Runtime 异常：{e!r}')
+            return
+        if res.accepted:
+            self.get_logger().info(f'Agent 接受 {text!r}：{res.message}（{res.task_id}）')
+        else:
+            # **原样转述** Agent 给的理由（例如"需要 LLM 规划，Phase 7 未实现"）
+            self.get_logger().warn(f'Agent 未接受 {text!r}：{res.message}')
 
     # ---------- 确定性命令（在工作线程里跑） ----------
 
