@@ -88,6 +88,11 @@ def generate_launch_description():
             'watch_motor', default_value='true',
             description='对 Motor Driver 的停更看门狗。⚠️ 它同时是**避障的方向来源**：'
                         '关掉它，避障会显式禁用并报错（不会静默退化成"不避障"）'),
+        DeclareLaunchArgument(
+            'zero_channel_topic', default_value='/cmd_vel',
+            description='独立零速通道的发布话题。⚠️ 验收工装可以把它指向 Motor Driver 的'
+                        '**干跑话题**，这样两路发布者被放在同一条话题上、'
+                        '而真的 /cmd_vel 上一个发布者都没有（`tools/cmd_vel_arbitration_probe.py`）'),
         Node(
             package='embodied_safety_runtime',
             executable='safety_runtime',
@@ -102,6 +107,7 @@ def generate_launch_description():
                 'motor_stop_service': LaunchConfiguration('motor_stop_service'),
                 'control_stop_service': LaunchConfiguration('control_stop_service'),
                 'watch_motor': LaunchConfiguration('watch_motor'),
+                'zero_channel_topic': LaunchConfiguration('zero_channel_topic'),
             }],
         ),
     ])
