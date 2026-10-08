@@ -17,7 +17,8 @@ import math
 import pytest
 
 from embodied_safety_runtime.obstacle_guard import (
-    REASON_OBSTACLE, REASON_UNKNOWN_SCAN, GuardConfig, GuardInput, evaluate)
+    REASON_OBSTACLE, REASON_UNKNOWN_SCAN, GuardConfig, GuardInput, evaluate,
+    reply_covers_question)
 
 
 def gi(vx=0.0, vy=0.0, known=True, fresh=True, valid=False, rng=-1.0, pending=False):
@@ -191,6 +192,56 @@ def test_stale_reading_is_not_reported_as_current():
     """不新鲜时**不能**透出旧值（那会让人以为它是当前的）。"""
     d = evaluate(GuardConfig(), gi(vx=0.0, fresh=False, valid=True, rng=0.15))
     assert d.range == -1.0
+
+
+# ---------- 回答必须和问题配对（真机验收找出来的缺陷） ----------
+#
+# 真实案例（2026-10-08，地面、`--phase direction`）：正前方 0.15 m 放了瓶子、
+# 左方 0.83 m 空旷。先验"往受阻的前方走"，守卫正确锁存；随后改成"往通畅的左方走"，
+# 守卫却**又锁存了**，日志写 `obstacle:0.15m@+90deg` —— 那个 0.15 是**前方**的距离，
+# 被当成了**左方**扇区的读数。原因就是回答没有和"问的是哪个方向"配对。
+
+def test_reply_for_another_direction_is_not_accepted():
+    """★ 回归：拿前方的读数去判左方 —— 必须判为"这不是这个问题的答案"。"""
+    front, left = 0.0, math.pi / 2.0
+    assert reply_covers_question(reply_center=front, reply_max_range=0.225,
+                                 reply_valid=True, bearing=left, stop_range=0.225) is False
+
+
+def test_reply_for_same_direction_is_accepted():
+    assert reply_covers_question(reply_center=0.0, reply_max_range=0.225,
+                                 reply_valid=True, bearing=0.0, stop_range=0.225) is True
+
+
+def test_small_direction_drift_still_counts_as_the_same_question():
+    """扇区是 ±30°，几度以内显然是同一个问题；容差取 0 会让速度微调时每拍都作废。"""
+    assert reply_covers_question(reply_center=0.0, reply_max_range=0.225,
+                                 reply_valid=True,
+                                 bearing=math.radians(4.0), stop_range=0.225) is True
+    assert reply_covers_question(reply_center=0.0, reply_max_range=0.225,
+                                 reply_valid=True,
+                                 bearing=math.radians(6.0), stop_range=0.225) is False
+
+
+def test_no_echo_only_counts_if_it_searched_far_enough():
+    """"0.20 m 内没有东西"不能担保 0.225 m 的阈值 —— 没回波时要有范围覆盖。"""
+    assert reply_covers_question(reply_center=0.0, reply_max_range=0.20,
+                                 reply_valid=False, bearing=0.0, stop_range=0.225) is False
+    assert reply_covers_question(reply_center=0.0, reply_max_range=0.225,
+                                 reply_valid=False, bearing=0.0, stop_range=0.225) is True
+
+
+def test_a_real_echo_counts_even_from_a_narrower_query():
+    """真看到一个 0.15 m 的东西，比阈值近就是比阈值近 —— 范围窄不影响这条。"""
+    assert reply_covers_question(reply_center=0.0, reply_max_range=0.10,
+                                 reply_valid=True, bearing=0.0, stop_range=0.225) is True
+
+
+def test_direction_match_wraps_around_the_pi_seam():
+    """正后方在 atan2 上可能落在 ±π 两侧，别让接缝把它判成"方向变了"。"""
+    assert reply_covers_question(reply_center=math.pi, reply_max_range=0.225,
+                                 reply_valid=True,
+                                 bearing=-math.pi + 0.01, stop_range=0.225) is True
 
 
 # ---------- 参数卫生 ----------

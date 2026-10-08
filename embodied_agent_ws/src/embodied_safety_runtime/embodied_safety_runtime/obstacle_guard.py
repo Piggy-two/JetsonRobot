@@ -124,6 +124,37 @@ class GuardDecision:
         return self.reason
 
 
+def angle_diff(a, b):
+    """两个角的最短差（弧度，落在 (−π, π]）。"""
+    d = (a - b) % (2.0 * math.pi)
+    return d - 2.0 * math.pi if d > math.pi else d
+
+
+#: 回答与当前问题之间允许的方向差。扇区是 ±30°，几度以内显然还是"同一个问题"；
+#: 容差取 0 会让速度微调时**每一拍**都判定作废、重新发问 —— 宽限一耗尽就变成假锁存。
+REPLY_DIRECTION_TOL = math.radians(5.0)
+
+
+def reply_covers_question(reply_center, reply_max_range, reply_valid,
+                          bearing, stop_range, tol=REPLY_DIRECTION_TOL):
+    """手头这份回答，**答的是不是现在这个问题**？两件事都要对上：
+
+      · **方向** —— 这份回答是问 `reply_center` 得来的，而此刻的运动方向是 `bearing`；
+      · **范围** —— 若这份回答说"扇区里什么都没看到"（`reply_valid=False`），
+        它只在**当时问的范围 ≥ 当前阈值**时才作数：拿一句"0.20 m 内没有东西"
+        去担保 0.225 m 的阈值是不成立的。
+        有回波时不受此限 —— 真看见一个 0.15 m 的东西，比阈值近就是比阈值近。
+
+    ⚠️ 不配对的后果**两个方向都有害**：旧方向近、新方向空 ⇒ **假锁存**；
+    旧方向远、新方向有障碍 ⇒ **漏判一拍**。真实案例见 `DEV_NOTES` 坑 28。
+    """
+    if abs(angle_diff(reply_center, bearing)) > tol:
+        return False
+    if reply_valid:
+        return True
+    return reply_max_range >= stop_range - 1e-9
+
+
 def evaluate(cfg, gi):
     """按 `cfg` 判定 `gi` 这一刻要不要停车。**纯函数，可离线证伪。**
 

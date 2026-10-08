@@ -81,7 +81,8 @@ from embodied_skills_interfaces.srv import SectorMinRange
 
 from embodied_safety_runtime.estop import (
     DEFAULT_SAFETY_PHRASES, EStopLatch, is_safety_command)
-from embodied_safety_runtime.obstacle_guard import GuardConfig, GuardInput, evaluate
+from embodied_safety_runtime.obstacle_guard import (
+    GuardConfig, GuardInput, evaluate, reply_covers_question)
 from embodied_safety_runtime.watchdog import StalenessWatchdog
 
 
@@ -136,6 +137,12 @@ class SafetyRuntime(Node):
         self._heartbeat_time = None
         self._reply = None                 # (valid, range)
         self._reply_time = None
+        #: 手头这份回答**是问哪个方向 / 什么范围**得到的 —— 回答必须和问题配对，
+        #: 否则会把别的方向的距离当成这个方向的（见 `reply_covers_question`）
+        self._reply_center = None
+        self._reply_max_range = None
+        self._asked_center = None
+        self._asked_max_range = None
         self._sector_fut = None
         self._asking_since = None          # 开始问却还没拿到回答的起点（有界宽限）
         self._guard = None                 # 最近一次 GuardDecision
@@ -260,6 +267,9 @@ class SafetyRuntime(Node):
                 res = self._sector_fut.result()
                 self._reply = (bool(res.valid), float(res.range))
                 self._reply_time = now
+                # 连同"这个问题是什么"一起存 —— 回答和问题分家就会出事
+                self._reply_center = self._asked_center
+                self._reply_max_range = self._asked_max_range
                 self._asking_since = None          # 拿到了，宽限期结束（见下）
             except Exception as exc:                      # noqa: BLE001
                 self._reply = None
@@ -271,6 +281,26 @@ class SafetyRuntime(Node):
         stop_range = min(self._guard_cfg.max_range,
                          max(self._guard_cfg.min_range,
                              speed * self._guard_cfg.lookahead))
+
+        # ②′ **手头这份回答，如果不是"现在这个问题"的答案，就丢掉**
+        #
+        # ⚠️ 早先没有这一步，于是方向一变（例如从"前进"改成"左移"）那一刻，
+        #    守卫会拿**上一个方向**的距离去和**这个方向**的阈值比 —— 真实案例：
+        #    前方 0.15 m 有瓶子、左方 0.83 m 空旷，改成左移后守卫读到
+        #    "左方 0.15 m" 并**假锁存**（`DEV_NOTES` 坑 28 / **D-039**）。
+        #    反过来的情形更要命：旧方向远、新方向有障碍 ⇒ **漏判一拍**。
+        #    丢掉的这一份不会被当成"没有回答"而下重手 —— 下面 ③ 会按当前方向
+        #    立刻重问，④ 走的是既有的**有界宽限**（坑 25 那套），所以既不假锁存、
+        #    也不会因为宽限而长期不判定。
+        if self._reply is not None:
+            bearing_now = math.atan2(self._vy, self._vx)
+            if not reply_covers_question(
+                    self._reply_center, self._reply_max_range, self._reply[0],
+                    bearing_now, stop_range):
+                self._reply = None
+                self._reply_time = None
+                self._reply_center = None
+                self._reply_max_range = None
 
         # ③ 发新请求（一次只留一个在飞，避免 10 Hz 叠请求把原语压垮）
         #
@@ -284,6 +314,9 @@ class SafetyRuntime(Node):
                 req.center = math.atan2(self._vy, self._vx)
                 req.width = self._guard_cfg.width
                 req.max_range = stop_range
+                # 记下"问的是什么"，回答回来时一起存（②′ 要用它判断配对）
+                self._asked_center = float(req.center)
+                self._asked_max_range = float(req.max_range)
                 self._sector_fut = self._sector_cli.call_async(req)
                 if self._asking_since is None:
                     # 记下"从什么时候开始问却还没拿到回答" —— 这是上面那条**有界宽限**

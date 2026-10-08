@@ -3,7 +3,9 @@
 """**安全链**架空验收（D-036 避障 / D-037 结构性否决）—— 四轮离地。
 
     ⚠️ 这是【验收工装】，不是运行时组件。
-    ⚠️ **前提：四轮离地。** 轮子在空中转，车不会跑掉。
+    ⚠️ **`veto` / `guard` 两段的前提是四轮离地**（轮子在空中转，车不会跑掉）。
+       **`direction` 一段不要求**：它把"该被拦住"的那一步放在任何位移之前，
+       所以车在该停的时候本来就不该动 —— 但**仍需要有人看护、能直接断电**。
     ⚠️ 本工装会让 Motor Driver 以 `dry_run:=false` 运行 —— **人必须在场、能直接断电**。
 
 它要回答的问题：**"停"这件事，在物理上真的成立吗？**
@@ -21,8 +23,13 @@
     --phase guard  验**避障停车**（D-036）：真雷达 + 真守卫，命令它前进，
                    看守卫是否在底盘侧把车拦住。
     --phase direction  验守卫的**方向性**：先问四个方向各有多远，然后
-                   往**通畅**方向走（**必须放行**）+ 往**受阻**方向走（**必须拦下**）做对照。
+                   往**受阻**方向走（**必须拦下**）+ 往**通畅**方向走（**必须放行**）做对照。
                    ⇒ 一个什么都拦的守卫会被关掉，等于没有；这一条防的是那个。
+                   ⚠️ **顺序是刻意的**：**先拦下、后放行**。反过来的话，"放行"那一步
+                   会先把车真的挪走 0.3 m，再拿旧方位去判"拦下" —— 方位早变了 ⇒ 假失败。
+                   把"拦下"放在任何位移之前，几何前提才成立。
+                   ⇒ **这一段在地面上也能跑**（前两段不行）：车在"该被拦住"的那一步
+                   本来就**不该动**，所以它顺带就把"命令它真的朝障碍走"验了。
                    ⚠️ **摆位有硬要求（两个方向都得有）**：至少一个方向 > 0.40 m 是空的，
                    **且**至少一个方向 ≤ 0.225 m 有东西 —— 后者用守卫**真实的**阈值
                    （`min(1.0, max(0.20, 0.15×1.5))`），不是随手拍的数。缺任一边即**拒测**
@@ -470,8 +477,92 @@ def phase_direction(node, rep):
         return
     rep('存在一个受阻方向', True, f'{blocked[0][0]}（最近回波 {blocked[0][3]:.3f} m）')
 
-    name, center, move, r, a = clear[0]
-    print(f'\n【2】★ 往**通畅的「{name}」**方向走 0.3 m —— 守卫**不该**拦它')
+    # ── 【2】对照（**先做**）────────────────────────────────────────────────
+    # ⚠️ **顺序是刻意的，而且改过。** 早先的版本先验"放行"、后验"拦下"，
+    #    在那个顺序下，"放行"那一步会在**地面**上真的把车挪走 0.3 m；
+    #    挪完之后再拿【1】量到的方位去判"拦下"，方位早就不是那个方位了：
+    #        物体在正前 0.15 m；车往「左」走 0.3 m 后，物体在车体系里变成
+    #        (0.15, −0.3)，方位 atan2(−0.3, 0.15) = **−63°** —— 跑出 ±30° 扇区外，
+    #        守卫看不见它 ⇒ **假失败**。
+    #    把"拦下"提到**任何位移之前**，几何前提就成立；而且此刻车**本来就不该动**，
+    #    所以这一条在地面上尤其有价值（它就是文档里一直空白的"命令它真的朝障碍走"）。
+    bname, bcenter, bmove, br, ba = blocked[0]
+    print(f'\n【2】★ 先验**拦下**：往**受阻的「{bname}」**方向走（那里 {br:.3f} m 有东西）'
+          f'—— 守卫**该**拦')
+    with node._lock:
+        node._reset()
+    req2 = MoveRelative.Request()
+    req2.x = float(bmove['x'])
+    req2.y = float(bmove['y'])
+    node.move_cli.call_async(req2)
+    got = node.wait_until(lambda: (node.sstat(0) or 0) > 0.5, timeout=6.0)
+    rep(f'★ 守卫拦住了「{bname}」方向', got, f'safety status[0]={node.sstat(0)}')
+    node.spin_for(1.2)
+    with node._lock:
+        node._reset()
+    spans2, smax2, rps2, rmax2 = node.phase(2.0)
+    print(f'    拦下后：{fmt(node, spans2, smax2, rps2, rmax2)}')
+    rep('★ 拦下后轮速指令归零', rmax2 < 1e-6, f'{rmax2:.4f}')
+
+    # ── 收尾这一档，再把车交还给"能走"的状态 ──
+    # ⚠️ 顺序与"等它真的回来"都是必需的，这一版**踩过坑**：
+    #    `safety_release` 之后立刻 `motor_resume`，那时 Motor Driver **还在状态 5**
+    #    （`safety_blocked`），这次 resume 被吃掉；等它落到 **4**（`rearm_required`
+    #    —— D-025/D-037 刻意要求"被拦住后必须显式重新使能"）时，已经没人再叫它了。
+    #    而原来的代码**不检查 `wait_until` 的返回值**就往下走，于是 Control Skill
+    #    如实拒绝（"底盘未确认在线"），却被工装报成 **"轮子没转"** ——
+    #    **拿一个错误的原因否定了正确的系统**。所以：等它离开 5 → 再 resume →
+    #    **确认真的回到能走的状态，回不来就拒测**。
+    node.call(node.ctrl_stop)          # 中止那个还没跑完的请求（它正指着障碍）
+    node.spin_for(0.5)
+    node.call(node.safety_release)
+    node.wait_until(lambda: node.mstat(I_STATE) != STATE_SAFETY_BLOCKED, timeout=6.0)
+    rearmed = False
+    for _ in range(3):
+        node.call(node.motor_resume)
+        rearmed = node.wait_until(
+            lambda: node.mstat(I_STATE) in (STATE_OK, STATE_NO_CMD), timeout=4.0)
+        if rearmed:
+            break
+    rep('★ 解除后底盘已重新使能（否则 Control Skill 会正确拒绝，别把那个读成"没转"）',
+        rearmed, f'state={node.mstat(I_STATE)}')
+    if not rearmed:
+        print('     ⛔ 底盘没回到能走的状态 —— 后面的"放行"验不了，拒测。'
+              '（这不等于守卫有问题：守卫那一条已经过了。）')
+        return
+
+    # ── 【3】放行（**后做**：这时才允许车真的动）────────────────────────────
+    # 再量一次。**这是必要的**：如果【2】没拦住，车已经挪过了，
+    # 【1】的读数就不再是"此刻"的事实 —— 拿旧读数当前提会把假失败读成真失败。
+    print(f'\n【3】★ 再验**放行**：指令发出前**重新量一次**方向（确保"通畅"是此刻的事实）')
+    fresh = probe_four_directions(node)
+    if fresh[0][3] is None:
+        rep('★ 指令发出前仍能问到一个通畅方向', False, 'sector_min_range 不可用')
+        return
+    fresh_clear, fresh_blocked = classify_directions(fresh)
+    if not fresh_clear:
+        rep('★ 指令发出前仍能问到一个通畅方向', False,
+            '此刻四个方向都已不通畅 —— 不盲目发运动指令')
+        return
+    # ★ **对照的前提必须还在**：如果【2】用的那个受阻方向此刻**不再受阻**，
+    #   说明那一段把障碍物挪走/撞倒了。照旧往下走会得到"同一个方向既拦下又放行"
+    #   这种胡话 —— 而且会往一个刚刚还被判受阻的方向发运动指令。
+    #   （真机第一次就撞上了：地面【2】的蠕动把 0.20 m 外的瓶子撞倒推走了。）
+    if bname not in [p[0] for p in fresh_blocked]:
+        print()
+        print(f'  ⛔ **对照的前提没了**：【2】判为受阻的「{bname}」此刻已经不通阻'
+              f'（re-probe 显示它已通畅）—— 拒测。')
+        print('     这说明【2】那一段把障碍物挪走了/撞倒了。')
+        print('     地面测试尤其容易：**车在守卫锁存前的蠕动就足以碰到 0.2 m 外的东西**。')
+        print('     请把障碍物换成**推不动**的（墙 / 装水的大桶 / 抵住的东西），或把车架起来。')
+        rep('★ 【2】用的受阻方向此刻仍然受阻（对照的前提还在）', False,
+            f'「{bname}」已不再受阻')
+        return
+    name, center, move, r, a = fresh_clear[0]
+    if name != clear[0][0]:
+        print(f'    ⚠️ 通畅方向与【1】时不同（{clear[0][0]} → {name}）—— '
+              f'说明【2】那一段车挪过位置，以**此刻**为准')
+    print(f'    往**通畅的「{name}」**方向走 0.3 m —— 守卫**不该**拦它')
     with node._lock:
         node._reset()
     req = MoveRelative.Request()
@@ -485,30 +576,9 @@ def phase_direction(node, rep):
     print(f'    Control Skill：{getattr(fut.result(), "message", "（还没回）") if fut.done() else "（进行中）"}')
     rep(f'★ 守卫**没有**拦「{name}」方向的运动', not latched, f'safety status[0]={node.sstat(0)}')
     rep(f'★ 而且轮子真的朝「{name}」转了', rmax > 0.1, f'窗口内最大 |rps| {rmax:.4f}')
-    node.spin_for(1.0)
-
-    bname, bcenter, bmove, br, ba = blocked[0]
-    print(f'\n【3】★ 对照组：往**受阻的「{bname}」**方向走（那里 {br:.3f} m 有东西）—— 守卫**该**拦')
-    node.call(node.safety_release)
-    node.call(node.motor_resume)
-    node.wait_until(lambda: node.mstat(I_STATE) in (STATE_OK, STATE_NO_CMD), timeout=8.0)
-    with node._lock:
-        node._reset()
-    req2 = MoveRelative.Request()
-    req2.x = float(bmove['x'])
-    req2.y = float(bmove['y'])
-    node.move_cli.call_async(req2)
-    got = node.wait_until(lambda: (node.sstat(0) or 0) > 0.5, timeout=6.0)
-    rep(f'★ 守卫拦住了「{bname}」方向', got, f'safety status[0]={node.sstat(0)}')
-    node.spin_for(1.2)
-    with node._lock:
-        node._reset()
-    spans3, smax3, rps3, rmax3 = node.phase(1.5)
-    print(f'    拦下后：{fmt(node, spans3, smax3, rps3, rmax3)}')
-    rep('★ 拦下后轮速指令归零', rmax3 < 1e-6, f'{rmax3:.4f}')
 
     print()
-    print(f'  ⇒ 同一台车、同一次会话：「{name}」放行、「{bname}」拦下 —— 守卫是**有方向的**，')
+    print(f'  ⇒ 同一台车、同一次会话：「{bname}」拦下、「{name}」放行 —— 守卫是**有方向的**，')
     print('     不是"一刀切"。一个什么都拦的守卫会被关掉，等于没有。')
 
 
@@ -561,7 +631,9 @@ def main():
                 return 1
             print(f'  ✅ 摆位满足：往「{clear[0][0]}」（{clear[0][3] if clear[0][3] > 0 else "无回波"}）'
                   f'走须放行、往「{blocked[0][0]}」（{blocked[0][3]:.3f} m）走须拦下。')
-            print('     下一步：起全套节点（四轮离地、人在场），跑 `--phase direction`。')
+            print('     下一步：起全套节点（人在场、能直接断电），跑 `--phase direction`。')
+            print('     （`direction` 不要求四轮离地 —— 它把"该被拦住"那一步放在位移之前；'
+                  '但【3】会真的把车开出去 0.3 m，那一侧要留够空。）')
             print()
             return 0
         finally:
@@ -575,7 +647,9 @@ def main():
         title = {'veto': '安全链架空验收 —— 结构性否决（D-037）',
                  'guard': '安全链架空验收 —— 避障停车（D-036）',
                  'direction': '安全链架空验收 —— 守卫的**方向性**（D-036）'}[args.phase]
-        print(f'  {title}（四轮离地）')
+        # `direction` 不要求四轮离地（它把"该被拦住"那一步放在位移之前）
+        where = '四轮离地' if args.phase in ('veto', 'guard') else '地面或离地均可'
+        print(f'  {title}（{where}）')
         print('=' * 74)
         print()
         if not preflight(node, rep, args.phase == 'veto'):
