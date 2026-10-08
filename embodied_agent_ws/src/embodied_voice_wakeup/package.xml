@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_voice_wakeup</name>
+  <version>0.1.0</version>
+  <description>
+    JetsonRobot Overlay 语音唤醒（Phase 5，Driver 层）—— **本地 KWS，本项目自己做**。
+
+    为什么不用厂商那条：环形麦的**硬件唤醒上报不可用**（2026-10-08 实测：断电重启后
+    说 3 遍唤醒词，控制串口 0 字节；握手包 4 种 RTS/DTR 组合全无应答）。
+    采集通路一直是好的（D-022 验过），坏的只是"模块把自己的判断报出来"这一条。
+    所以改用"环形麦采集 → 16 kHz → 本地 KWS 模型 → 唤醒事件"：
+    模型、阈值、关键词都在我们手里，可回归、可量召回率，不依赖厂商节点状态。
+
+    发布 /embodied/voice/wakeup（只在检出时发）与 /embodied/voice/diag。
+    本节点**不识别命令、不发任何控制指令、不做安全判定** —— 唤醒与安全无关。
+    ⚠️ 召回率不是 100%：沉默**不能**当作"用户没喊"的反证。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

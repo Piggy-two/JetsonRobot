@@ -1,0 +1,27 @@
+voice_wakeup:
+  ros__parameters:
+    # ⚠️ 唤醒模型是**大文件，不进 Git**（CLAUDE.md §6）。运行前按 README 的
+    #    "模型从哪来" 准备，然后把路径填在这里。留空 ⇒ 节点**拒绝启动**并说清原因 ——
+    #    一个"起来了但永远不报"的唤醒节点比没有更坏。
+    model_dir: /home/ubuntu/large_models/kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01
+    keywords_file: ''          # 空 = 用本包 share 下的 config/keywords.txt
+
+    # 音频输入。留空 = 系统默认输入设备。
+    # ⚠️ 本机实测（2026-10-08）：PulseAudio 的默认音源**就是**环形麦
+    #    （alsa_input.usb-0c76_USB_PnP_Audio_Device-00），所以留空是对的；
+    #    直接开 `hw:0,0` 也能用，但它会和"从同一个声卡放音"抢设备。
+    audio_device: ''
+    capture_rate: 48000        # 环形麦原生；节点内部按整数倍降到 16 kHz
+
+    num_threads: 2
+
+    # ⚠️ **召回与误报在它上面换**：越小越容易触发。
+    #    默认 0.25 时真机初测「说 5 遍认出 2 遍」—— **偏低**，需要按 README 的方式
+    #    实测标定（说 N 遍认几遍 / 说 M 句不相干的话误报几遍），别靠感觉调。
+    keywords_threshold: 0.25
+    keywords_score: 1.0
+    detect_cooldown: 1.0       # 秒。同一句避免连发
+
+    wake_topic: /embodied/voice/wakeup
+    diag_topic: /embodied/voice/diag
+    diag_rate: 2.0
