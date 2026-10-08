@@ -244,6 +244,36 @@ def test_direction_match_wraps_around_the_pi_seam():
                                  bearing=-math.pi + 0.01, stop_range=0.225) is True
 
 
+# ---------- 阈值下限的取值：有实测依据，且不许与运行时配置分家 ----------
+
+def test_default_min_range_is_the_measured_value():
+    """`min_range` 是**实测标定**出来的，不是拍的 —— 改它要有新的地面数据。
+
+    依据 D-040：阈值从**雷达**算，而撞上去的是**车头**（车体前伸量 0.131 m），
+    锁存前还会再跑 0.050~0.055 m。0.20 时只余 1.9 cm（实测 3.9 cm），
+    2026-10-08 提到 0.30。
+    """
+    assert GuardConfig().min_range == pytest.approx(0.30)
+
+
+def test_shipped_config_matches_the_dataclass_default():
+    """**运行时以那份 yaml 为准** —— 它和代码默认值分家，就会出现"代码说 0.30、
+    实际跑 0.20"这种谁也看不出来的状况（与坑 27 同族：两个数伺候同一件事）。"""
+    import yaml
+    from ament_index_python.packages import get_package_share_directory
+    import os
+    path = os.path.join(get_package_share_directory('embodied_safety_runtime'),
+                        'config', 'safety_runtime.yaml')
+    with open(path, 'r', encoding='utf-8') as fh:
+        cfg = yaml.safe_load(fh)
+    rf = next(body['ros__parameters'] for body in cfg.values()
+              if isinstance(body, dict) and 'ros__parameters' in body)
+    d = GuardConfig()
+    assert float(rf['obstacle_min_range']) == pytest.approx(d.min_range)
+    assert float(rf['obstacle_lookahead']) == pytest.approx(d.lookahead)
+    assert float(rf['obstacle_max_range']) == pytest.approx(d.max_range)
+
+
 # ---------- 参数卫生 ----------
 
 @pytest.mark.parametrize('kwargs', [

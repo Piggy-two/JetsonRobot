@@ -83,6 +83,10 @@ HIST_LEN = 7
 #: 车体最前端在雷达前方多远（由 `base_link_mec.stl` 包围盒算出，见 DEV_NOTES 坑 29）。
 #: 所有"离障碍还有多远"的余量都要减掉它 —— 雷达量的是雷达自己到障碍的距离。
 BODY_FRONT_AHEAD = 0.1306
+#: 守卫的阈值参数（`config/safety_runtime.yaml` 的副本）—— 用来**自己算**它会在哪儿喊停。
+#: ⚠️ 改守卫配置就要同步改这里，否则标定读数会指向一个不存在的阈值。
+GUARD_MIN_RANGE = 0.30      # 2026-10-08 按 D-040 由 0.20 提高
+GUARD_LOOKAHEAD = 1.5
 #: 摆位前提：前方参照物至少这么远，否则开不出 1 m 就没地方了。
 MIN_REFERENCE_RANGE = 1.15
 
@@ -440,8 +444,8 @@ def phase_stop(node, results, speed, max_travel):
         rep(results, '起点能看到参照物', False, '前方无回波')
         return
     print(f'\n【避障停车】以 {speed} m/s 朝参照物（{r0:.3f} m）直走，直到守卫锁存')
-    print(f'    守卫阈值 = max({0.20}, {speed} × 1.5) = '
-          f'{min(1.0, max(0.20, speed * 1.5)):.3f} m（从**雷达**算；'
+    print(f'    守卫阈值 = min({1.0}, max({GUARD_MIN_RANGE}, {speed} × {GUARD_LOOKAHEAD})) = '
+          f'{min(1.0, max(GUARD_MIN_RANGE, speed * GUARD_LOOKAHEAD)):.3f} m（从**雷达**算；'
           f'车头还要再往前 {BODY_FRONT_AHEAD:.3f} m）')
 
     ev0 = node._safety_events_flag
@@ -473,7 +477,7 @@ def phase_stop(node, results, speed, max_travel):
             except (IndexError, ValueError):
                 pass
             break
-    at_latch_thr = min(1.0, max(0.20, speed * 1.5))   # 守卫的阈值公式，自己算
+    at_latch_thr = min(1.0, max(GUARD_MIN_RANGE, speed * GUARD_LOOKAHEAD))  # 守卫的阈值公式
     if at_latch_range is None:
         rep(results, '事件里带上了"锁存那一刻的距离"', False, f'{ev}')
         return

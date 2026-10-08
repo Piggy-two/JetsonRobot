@@ -31,8 +31,9 @@
                    ⇒ **这一段在地面上也能跑**（前两段不行）：车在"该被拦住"的那一步
                    本来就**不该动**，所以它顺带就把"命令它真的朝障碍走"验了。
                    ⚠️ **摆位有硬要求（两个方向都得有）**：至少一个方向 > 0.40 m 是空的，
-                   **且**至少一个方向 ≤ 0.225 m 有东西 —— 后者用守卫**真实的**阈值
-                   （`min(1.0, max(0.20, 0.15×1.5))`），不是随手拍的数。缺任一边即**拒测**
+                   **且**至少一个方向 ≤ 守卫**真实的**阈值有东西 —— 后者由
+                   `min(max_range, max(min_range, 0.15×lookahead))` 算出（当前 0.30 m），
+                   **且会先读守卫的 yaml 核对**，对不上直接拒测（D-040）。缺任一边即**拒测**
                    （只验"放行"等于把"守卫是不是一刀切"放过去了）。
                    跑之前可用 `--phase direction --dry-classify` 先量一遍摆位。
 
@@ -58,6 +59,7 @@
 """
 
 import argparse
+import os
 import sys
 import threading
 import time
@@ -236,7 +238,15 @@ def fmt(node, spans, smax, rps, rmax):
 
 
 def preflight(node, rep, need_guard_off):
-    """公共前置：底盘在线 + 静基线。返回 False 表示拒测。"""
+    """公共前置：**判据与守卫同源** + 底盘在线 + 静基线。返回 False 表示拒测。"""
+    # 先核对"判据用的数"和"守卫用的数"是不是同一个 —— 见 guard_config_mismatch()
+    bad = guard_config_mismatch()
+    if bad:
+        print(f'  ⛔ **判据与被测物不同源** —— 拒测。')
+        for line in bad.split('。'):
+            if line.strip():
+                print(f'     {line.strip()}。')
+        return False
     node.spin_for(1.5)
     node.fire(node.motor_resume)
     ok = node.wait_until(
@@ -390,20 +400,68 @@ DIRECTIONS = [
 #     stop_range = min(max_range, max(min_range, 速度 × lookahead))
 # 并且它是**带着 max_range = stop_range 去问服务**的 —— 比它远的回波根本不返回
 # （`obstacle_guard.py` 里 `evaluate()` 的那条注释）。所以在 0.15 m/s 下：
-#     stop_range = min(1.00, max(0.20, 0.15 × 1.5)) = 0.225 m
+#     stop_range = min(1.00, max(0.30, 0.15 × 1.5)) = 0.30 m
 # ⚠️ 工装第一版只写了一个 `CLEAR_MARGIN = 0.40`，**两端共用** —— 于是
-#     (0.225, 0.40] 这一段成了死区：工装判它"受阻、守卫该拦"，
-#     而守卫带着 0.225 去问，看不到它，**不会拦**。把障碍物放 0.3 m 就会假失败。
+#     (阈值, 0.40] 这一段成了死区：工装判它"受阻、守卫该拦"，
+#     而守卫带着阈值去问，看不到它，**不会拦**。把障碍物放在死区里就会假失败。
 #     本版把"受阻"的上界改回守卫的真实阈值（**这是收紧，不是放行**）。
+#
+# ⚠️⚠️ **这四个数是守卫那份配置的副本，改成对不上就会重演上面那个坑。**
+#     所以下面 `preflight` 会**直接读守卫的 yaml 核对**，对不上就拒测 ——
+#     与其指望"改的人记得同步"，不如让不同步**当场报错**（D-040）。
 SKILL_SPEED = 0.15          # Control Skill 的 `nominal_speed` 默认值 —— 本工装用它走
-GUARD_MIN_RANGE = 0.20      # 守卫的 `min_range` 默认值
-GUARD_LOOKAHEAD = 1.5       # 守卫的 `lookahead` 默认值
-GUARD_MAX_RANGE = 1.00      # 守卫的 `max_range` 默认值
+GUARD_MIN_RANGE = 0.30      # 守卫的 `obstacle_min_range`（2026-10-08 按 D-040 由 0.20 提高）
+GUARD_LOOKAHEAD = 1.5       # 守卫的 `obstacle_lookahead`
+GUARD_MAX_RANGE = 1.00      # 守卫的 `obstacle_max_range`
 GUARD_STOP_RANGE = min(GUARD_MAX_RANGE, max(GUARD_MIN_RANGE, SKILL_SPEED * GUARD_LOOKAHEAD))
 
-#: 判"这个方向确实通畅"要离阈值足够远 —— 别贴着阈值下结论（0.40 ≈ 阈值的 1.8 倍）。
-#: 这个数**只用于"通畅"这一端**，不再兼任"受阻"的上界。
-CLEAR_MARGIN = 0.40
+#: 本工装往某个方向**真的要走多远**（`DIRECTIONS` 里每个 move 都是 0.3 m）。
+WALK = 0.30
+
+#: 判"这个方向确实通畅"的门槛 —— **必须同时满足"走之前不拦"和"走完之后也不拦"**：
+#:     走完之后离障碍的距离 ≈ 初始读数 − WALK，它必须还在阈值之上：
+#:         初始读数 > 阈值 + WALK
+#:     再留一点余量（阈值本身已经含了车头前伸量和蠕动，这里只留"别贴着下结论"的余量）。
+#: ⚠️ 这一条**不是**"1.5 倍阈值"那种拍出来的余量：0.30 阈值下，若只要求 > 0.45，
+#:     一个 0.478 m 的方向会被判"通畅"，可车往那儿开 0.3 m 就只剩 0.178 m —— **半路被拦**，
+#:     于是【3】假失败。**阈值一改，这一条自动跟着走**，不用再靠人记得同步。
+CLEAR_MARGIN = round(GUARD_STOP_RANGE + WALK + 0.10, 3)
+
+
+def guard_config_mismatch():
+    """读**守卫自己的那份 yaml**，跟本工装的常量核对。对不上返回一句人话，对得上返回 None。
+
+    为什么要这么做：这个坑已经发生过一次 —— 工装按 0.40 判"受阻"、守卫按 0.225 去看，
+    中间一段谁都测不出真失败（坑 27）。**判据与被测物各拿一个数，迟早会分家。**
+    不能打开 yaml 时只警告不拒测（比如工装被单独拷出去跑）。
+    """
+    try:
+        import yaml
+        from ament_index_python.packages import get_package_share_directory
+        path = os.path.join(get_package_share_directory('embodied_safety_runtime'),
+                            'config', 'safety_runtime.yaml')
+        with open(path, 'r', encoding='utf-8') as fh:
+            cfg = yaml.safe_load(fh)
+    except Exception as exc:                                     # noqa: BLE001
+        print(f'  ⚠️ 读不到守卫的配置（{exc}）—— 跳过"判据同源"核对，'
+              f'本工装按 min_range={GUARD_MIN_RANGE} / lookahead={GUARD_LOOKAHEAD} 判。')
+        return None
+    # 顶层是节点名（`safety_runtime:`），下面才是 `ros__parameters` —— 别写死节点名，
+    # 换一个 launch 用的 yaml 也要能读
+    rf = {}
+    for _node, body in (cfg or {}).items():
+        if isinstance(body, dict) and 'ros__parameters' in body:
+            rf = body['ros__parameters']
+            break
+    live = (float(rf.get('obstacle_min_range', -1)),
+            float(rf.get('obstacle_lookahead', -1)),
+            float(rf.get('obstacle_max_range', -1)))
+    mine = (GUARD_MIN_RANGE, GUARD_LOOKAHEAD, GUARD_MAX_RANGE)
+    if live != mine:
+        return (f'守卫配置 {live} ≠ 工装常量 {mine} —— **判据和被测物各用了一个数**，'
+                f'这正是坑 27 那个死区的来源。请把工装里的常量改成与 '
+                f'config/safety_runtime.yaml 一致。')
+    return None
 
 
 def classify_directions(probed):
@@ -424,7 +482,7 @@ def classify_directions(probed):
 
 def probe_four_directions(node):
     """问四个方向的最近回波并打印读数。**纯查询，不驱动任何东西。** 返回 probed。"""
-    print(f'     守卫在 {SKILL_SPEED} m/s 下的真实阈值 = {GUARD_STOP_RANGE:.3f} m；'
+    print(f'     守卫在 {SKILL_SPEED} m/s 下的真实阈值 = {GUARD_STOP_RANGE:.3f} m（已与守卫配置核对）；'
           f'判"通畅"要 > {CLEAR_MARGIN} m（留余量，别贴着阈值下结论）')
     probed = []
     for name, center, move in DIRECTIONS:
