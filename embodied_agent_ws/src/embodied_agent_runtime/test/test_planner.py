@@ -22,6 +22,14 @@ def _registry():
                           ParamSpec('step', minimum=0.02, maximum=0.2)],
                   timeout_s=45.0,
                   allowed_principals=['agent.planner']),
+        SkillSpec('autonomous.turn_until_clear', tier='task',
+                  target='/autonomous_skills/turn_until_clear', srv_type='s',
+                  params=[ParamSpec('max_angle', minimum=0.1, maximum=3.141592653589793),
+                          ParamSpec('clear_range', minimum=0.1, maximum=1.0),
+                          ParamSpec('step_angle', minimum=0.05, maximum=1.5707963267948966),
+                          ParamSpec('direction', minimum=-1.0, maximum=1.0)],
+                  timeout_s=45.0,
+                  allowed_principals=['agent.planner']),
         SkillSpec('control.move_relative', tier='control',
                   target='/control_skills/move_relative', srv_type='s',
                   params=[ParamSpec('x')], timeout_s=15.0,
@@ -52,7 +60,7 @@ def test_empty_rule_table_refuses_without_naming_a_skill():
     r = planner.plan('去桌子旁边找杯子', {}, _registry())
     assert r.accepted is False
     assert '没有匹配' in r.reason
-    assert r.skill is None
+    assert r.steps == []
 
 
 def test_unmatched_text_is_refused_with_the_same_honest_reason():
@@ -71,8 +79,9 @@ def test_empty_text_is_refused():
 def test_matching_rule_yields_a_task_tier_call():
     r = planner.plan('走一小段', TASK_RULE, _registry())
     assert r.accepted is True
-    assert r.skill == 'autonomous.advance_until_blocked'
-    assert r.args == {'max_distance': 0.2, 'clear_range': 0.5, 'step': 0.1}
+    assert len(r.steps) == 1                       # 单步规则 ⇒ 一个步骤
+    assert r.steps[0].skill == 'autonomous.advance_until_blocked'
+    assert r.steps[0].args == {'max_distance': 0.2, 'clear_range': 0.5, 'step': 0.1}
 
 
 def test_matching_ignores_punctuation_and_spaces():
@@ -142,4 +151,69 @@ def test_planner_output_can_never_describe_a_control_action():
                         ('偷偷动一下', {'偷偷动一下': {'skill': 'control.move_relative'}})):
         r = planner.plan(text, rules, reg)
         if r.accepted:
-            assert reg.require(r.skill).tier == 'task'
+            assert all(reg.require(s.skill).tier == 'task' for s in r.steps)
+
+
+# ==========================================================================
+# ★ 多步计划（D-043）
+# ==========================================================================
+
+MULTI_RULE = {
+    '脱困': {'steps': [
+        {'skill': 'autonomous.advance_until_blocked',
+         'args': {'max_distance': 0.2, 'clear_range': 0.5, 'step': 0.1}},
+        {'skill': 'autonomous.turn_until_clear',
+         'args': {'max_angle': 1.0, 'clear_range': 0.5, 'step_angle': 0.3,
+                  'direction': 1.0}},
+        {'skill': 'autonomous.advance_until_blocked',
+         'args': {'max_distance': 0.2, 'clear_range': 0.5, 'step': 0.1}},
+    ]}}
+
+
+def test_multi_step_rule_yields_an_ordered_plan():
+    r = planner.plan('脱困', MULTI_RULE, _registry())
+    assert r.accepted is True
+    assert [s.skill for s in r.steps] == [
+        'autonomous.advance_until_blocked',
+        'autonomous.turn_until_clear',
+        'autonomous.advance_until_blocked']
+
+
+def test_a_single_bad_step_rejects_the_whole_plan():
+    """★ **不做半条**。
+
+    如果第 1 步能做、第 2 步踩红线，那么"先做第 1 步、做到一半再报错"
+    会把车留在**半执行完**的状态，而计划本身已经作废 —— 没人知道该继续还是退回去。
+    ⇒ 动之前就知道整条合法。
+    """
+    bad = {'脱困': {'steps': [
+        {'skill': 'autonomous.advance_until_blocked', 'args': {'max_distance': 0.2,
+                                                             'clear_range': 0.5,
+                                                             'step': 0.1}},
+        {'skill': 'control.move_relative', 'args': {'x': 0.1}},      # ← 第 2 步踩红线
+    ]}}
+    r = planner.plan('脱困', bad, _registry())
+    assert r.accepted is False
+    assert r.steps == []                       # 一个步骤都不给
+    assert '第 2 步' in r.reason               # 且指出是**哪一步**
+    assert '整条计划被拒' in r.reason
+
+
+def test_writing_both_skill_and_steps_is_refused():
+    """两种写法同时出现 ⇒ 写的人自己也没想清要走几步。"""
+    r = planner.plan('脱困', {'脱困': {'skill': 'autonomous.advance_until_blocked',
+                                       'steps': [{'skill': 'x'}]}}, _registry())
+    assert r.accepted is False
+    assert '同时写了' in r.reason
+
+
+def test_steps_must_be_a_list():
+    r = planner.plan('脱困', {'脱困': {'steps': 'advance'}}, _registry())
+    assert r.accepted is False
+    assert '列表' in r.reason
+
+
+def test_rule_with_neither_skill_nor_steps_is_refused():
+    r = planner.plan('脱困', {'脱困': {'nonsense': 1}}, _registry())
+    assert r.accepted is False
+    assert '既没有' in r.reason

@@ -31,6 +31,14 @@ def _registry():
                           ParamSpec('clear_range', minimum=0.1, maximum=1.0),
                           ParamSpec('step', minimum=0.02, maximum=0.2)],
                   timeout_s=45.0, allowed_principals=['agent.planner']),
+        SkillSpec('autonomous.turn_until_clear', tier='task',
+                  target='/autonomous_skills/turn_until_clear', srv_type='s',
+                  params=[ParamSpec('max_angle', minimum=0.1, maximum=3.141592653589793),
+                          ParamSpec('clear_range', minimum=0.1, maximum=1.0),
+                          ParamSpec('step_angle', minimum=0.05, maximum=1.5707963267948966),
+                          ParamSpec('direction', minimum=-1.0, maximum=1.0)],
+                  timeout_s=45.0,
+                  allowed_principals=['agent.planner']),
         SkillSpec('control.move_relative', tier='control',
                   target='/control_skills/move_relative', srv_type='s',
                   params=[ParamSpec('x', minimum=-0.5, maximum=0.5),
@@ -67,7 +75,10 @@ class FakeClient:
 
 def test_menu_exposes_only_available_task_skills():
     menu = skill_menu(_registry())
-    assert [m['skill'] for m in menu] == ['autonomous.advance_until_blocked']
+    # 菜单里**只有可用的 task-tier**：两个都在（`control.*`/`primitive.*`
+    # 与不可用的 `autonomous.broken` 都不该出现）
+    assert [m['skill'] for m in menu] == ['autonomous.advance_until_blocked',
+                                          'autonomous.turn_until_clear']
 
 
 def test_menu_carries_description_units_and_limits():
@@ -96,12 +107,14 @@ def test_prompt_states_the_red_line_and_lists_the_menu():
 # ==========================================================================
 
 def test_parse_plain_json():
+    # 一步与多步是**同一个形状**（steps 是长度为 1 的列表）——
+    # 少一个分支，也少一处"单步走这条、多步走那条"从而严格度分家的机会。
     assert parse_reply(GOOD_REPLY) == (
-        'skill', ('autonomous.advance_until_blocked', GOOD_ARGS))
+        'steps', [{'skill': 'autonomous.advance_until_blocked', 'args': GOOD_ARGS}])
 
 
 def test_parse_tolerates_code_fences():
-    assert parse_reply('```json\n' + GOOD_REPLY + '\n```')[0] == 'skill'
+    assert parse_reply('```json\n' + GOOD_REPLY + '\n```')[0] == 'steps'
 
 
 def test_parse_refuse():
@@ -173,8 +186,9 @@ def test_llm_good_choice_is_accepted():
     c = FakeClient(GOOD_REPLY)
     r, raw = plan_with_llm('往前走一小段', _registry(), c)
     assert r.accepted is True
-    assert r.skill == 'autonomous.advance_until_blocked'
-    assert r.args == GOOD_ARGS
+    assert len(r.steps) == 1
+    assert r.steps[0].skill == 'autonomous.advance_until_blocked'
+    assert r.steps[0].args == GOOD_ARGS
     assert raw == GOOD_REPLY
     assert len(c.calls) == 1
 
@@ -372,11 +386,70 @@ def test_no_path_can_accept_a_non_task_skill():
     for reply in replies:
         out = plan_task('随便一句话', {}, reg, FakeClient(reply))
         if out.result.accepted:
-            assert reg.require(out.result.skill).tier == 'task', reply
+            assert all(reg.require(s.skill).tier == 'task'
+                       for s in out.result.steps), reply
 
 
 def test_accepted_plan_is_always_dispatchable_by_the_gateway_principal():
     """被接受的技能必须真的允许 `agent.planner` 调 —— 否则会在网关那层才被拒。"""
     out = plan_task('往前走一小段', {}, _registry(), FakeClient(GOOD_REPLY))
     assert out.result.accepted is True
-    assert 'agent.planner' in _registry().require(out.result.skill).allowed_principals
+    assert all('agent.planner' in _registry().require(s.skill).allowed_principals
+               for s in out.result.steps)
+
+
+# ==========================================================================
+# ★ 多步计划（D-043）
+# ==========================================================================
+
+MULTI_REPLY = ('{"steps": ['
+               '{"skill": "autonomous.advance_until_blocked", '
+               '"args": {"max_distance": 0.2, "clear_range": 0.5, "step": 0.1}}, '
+               '{"skill": "autonomous.turn_until_clear", '
+               '"args": {"max_angle": 1.0, "clear_range": 0.5, "step_angle": 0.3, '
+               '"direction": 1.0}}]}')
+
+
+def test_parse_multi_step_reply():
+    kind, steps = parse_reply(MULTI_REPLY)
+    assert kind == 'steps'
+    assert [s['skill'] for s in steps] == ['autonomous.advance_until_blocked',
+                                           'autonomous.turn_until_clear']
+
+
+def test_empty_steps_is_a_parse_error():
+    """空计划没有意义 —— 要么给步骤，要么用 refuse 明确拒绝。"""
+    with pytest.raises(ReplyError, match='空数组'):
+        parse_reply('{"steps": []}')
+
+
+def test_steps_must_be_an_array():
+    with pytest.raises(ReplyError, match='必须是数组'):
+        parse_reply('{"steps": {"skill": "x"}}')
+
+
+def test_a_step_without_a_skill_name_is_a_parse_error():
+    with pytest.raises(ReplyError, match='第 1 步'):
+        parse_reply('{"steps": [{"args": {}}]}')
+
+
+def test_llm_multi_step_plan_is_accepted_whole():
+    r, _raw = plan_with_llm('往前走，被挡就转个方向', _registry(), FakeClient(MULTI_REPLY))
+    assert r.accepted is True
+    assert len(r.steps) == 2
+
+
+def test_llm_multi_step_with_a_red_line_anywhere_is_rejected_whole():
+    """★ 多步**不是**绕过红线的办法：任何一步踩线，整条被拒，且**一个步骤都不执行**。
+
+    这条要钉死 —— 否则模型很容易想"第 1 步合法、把越权的塞到第 2 步"。
+    """
+    reply = ('{"steps": ['
+             '{"skill": "autonomous.advance_until_blocked", '
+             '"args": {"max_distance": 0.2, "clear_range": 0.5, "step": 0.1}}, '
+             '{"skill": "control.move_relative", "args": {"x": 0.1}}]}')
+    r, _raw = plan_with_llm('随便', _registry(), FakeClient(reply))
+    assert r.accepted is False
+    assert r.steps == []
+    assert '第 2 步' in r.reason
+    assert '架构红线' in r.reason

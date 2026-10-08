@@ -30,3 +30,20 @@ rules:
       max_distance: 0.2      # m，策略上限 0.5
       clear_range: 0.25      # m，**必须实测标定**
       step: 0.1              # m，必须 ≤ max_distance
+
+  # ---- 多步计划（D-043，2026-10-08）----------------------------------------
+  # 一个计划是一串**按顺序执行**的步骤。**每一步各自经网关**，
+  # 六项检查一遍不少；而且**任何一步不合法 ⇒ 整条计划被拒**（不做半条）。
+  # 下面的例子就是最小的"脱困"：前进 → 被挡住就转身 → 再前进。
+  往前走被挡就绕开:
+    steps:
+      - {skill: autonomous.advance_until_blocked,
+         args: {max_distance: 0.3, clear_range: 0.5, step: 0.1}}
+      - {skill: autonomous.turn_until_clear,
+         args: {max_angle: 1.57, clear_range: 0.5, step_angle: 0.3, direction: 1.0}}
+      - {skill: autonomous.advance_until_blocked,
+         args: {max_distance: 0.3, clear_range: 0.5, step: 0.1}}
+  # ⚠️ 推进规则：某步报 FAILED / CANCELLED ⇒ **整条中止**；
+  #    其余终态（ARRIVED / BLOCKED / TARGET_FOUND / TARGET_LOST）⇒ **继续下一步**。
+  #    `BLOCKED` 必须继续 —— 脱困计划成立的前提就是它。
+  # ⚠️ `skill:` 与 `steps:` **不许同时写**（那样"走几步"不明确，会被拒）。

@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""钉住 WAIT 的推进语义 —— 尤其是「**只有任务级事件唤醒 Agent**」（D-004）。"""
+"""钉住 WAIT 的推进语义 —— 尤其是「**只有任务级事件唤醒 Agent**」（D-004）与
+**多步计划的推进规则**（D-043）。
+"""
 
 import pytest
 
 from embodied_agent_runtime import execution as ex
+from embodied_agent_runtime.planner import Step
 from embodied_skill_gateway import task_state as ts
+
+ADV = 'autonomous.advance_until_blocked'
+TURN = 'autonomous.turn_until_clear'
 
 
 def _exec(**kw):
     return ex.Executor(**kw)
 
 
-def _submit(e, task_id='t1', skill='autonomous.advance_until_blocked',
-            timeout_s=10.0, now=100.0):
-    return e.submit(task_id, skill, 'agent.planner', timeout_s, now=now)
+def _submit(e, task_id='t1', skill=ADV, timeout_s=10.0, now=100.0, steps=None):
+    """提交一个计划并把第 1 步绑到 `task_id` 上（单步时计划 id 与它相同）。"""
+    steps = steps if steps is not None else [Step(skill, {})]
+    rec = e.submit_plan(task_id, steps, 'agent.planner', timeout_s, now=now)
+    if rec is not None:
+        e.bind_step(task_id, 0, task_id)
+    return rec
 
 
 # ---------- 提交 ----------
@@ -25,6 +35,7 @@ def test_submit_creates_a_pending_task_with_a_monotonic_deadline():
     assert rec is not None
     assert rec.deadline == pytest.approx(110.0)
     assert rec.woken is False
+    assert rec.total == 1
     assert e.get('t1') is rec
 
 
@@ -34,6 +45,12 @@ def test_duplicate_task_id_is_refused():
     assert _submit(e) is None
 
 
+def test_empty_plan_is_refused():
+    """一个没有步骤的计划没有意义 —— 它永远不会产生终态，只会挂在那儿。"""
+    e = _exec()
+    assert e.submit_plan('t1', [], 'agent.planner', 10.0, now=100.0) is None
+
+
 # ==========================================================================
 # ★ 「只有任务级事件唤醒 Agent」
 # ==========================================================================
@@ -41,16 +58,17 @@ def test_duplicate_task_id_is_refused():
 def test_task_tier_terminal_wakes_the_agent():
     e = _exec()
     _submit(e)
-    assert e.on_event('t1', ts.ARRIVED) == ex.WAKE
+    out = e.on_event('t1', ts.ARRIVED)
+    assert out.action == ex.WAKE
     assert e.get('t1').woken is True
 
 
 @pytest.mark.parametrize('state', [ts.BLOCKED, ts.FAILED, ts.CANCELLED,
                                    ts.TARGET_FOUND, ts.TARGET_LOST])
-def test_every_task_terminal_wakes(state):
+def test_every_task_terminal_ends_a_one_step_plan(state):
     e = _exec()
     _submit(e)
-    assert e.on_event('t1', state) == ex.WAKE
+    assert e.on_event('t1', state).action == ex.WAKE
 
 
 def test_control_tier_finished_does_NOT_wake_the_agent():
@@ -62,7 +80,7 @@ def test_control_tier_finished_does_NOT_wake_the_agent():
     """
     e = _exec()
     _submit(e, skill='control.move_relative')
-    assert e.on_event('t1', ts.FINISHED) == ex.RECORD
+    assert e.on_event('t1', ts.FINISHED).action == ex.RECORD
     assert e.get('t1').woken is False
 
 
@@ -70,9 +88,9 @@ def test_control_tier_finished_does_NOT_wake_the_agent():
 def test_intermediate_states_are_recorded_but_do_not_wake(state):
     e = _exec()
     _submit(e)
-    assert e.on_event('t1', state) == ex.RECORD
+    assert e.on_event('t1', state).action == ex.RECORD
     assert e.get('t1').woken is False
-    assert e.get('t1').last_state == state
+    assert e.get('t1').last_step_state == state
 
 
 def test_events_for_other_tasks_are_ignored_not_alarmed():
@@ -82,17 +100,83 @@ def test_events_for_other_tasks_are_ignored_not_alarmed():
     """
     e = _exec()
     _submit(e, task_id='mine')
-    assert e.on_event('someone-elses-task', ts.ARRIVED) == ex.IGNORE
+    assert e.on_event('someone-elses-task', ts.ARRIVED).action == ex.IGNORE
 
 
 def test_duplicate_terminal_does_not_wake_twice():
     """终态恰好一个（`task_table` 保证）。真到这一步说明上游出了问题 ——
-    但无论如何**不能唤醒两次**：Agent 会以为有两个任务先后完成了。"""
+    但无论如何**不能唤醒两次**：Agent 会以为有两个任务先后完成。"""
     e = _exec()
     _submit(e)
-    assert e.on_event('t1', ts.ARRIVED) == ex.WAKE
-    assert e.on_event('t1', ts.ARRIVED) == ex.DUPLICATE
-    assert e.on_event('t1', ts.BLOCKED) == ex.DUPLICATE
+    assert e.on_event('t1', ts.ARRIVED).action == ex.WAKE
+    assert e.on_event('t1', ts.ARRIVED).action == ex.DUPLICATE
+    assert e.on_event('t1', ts.BLOCKED).action == ex.DUPLICATE
+
+
+# ==========================================================================
+# ★ ★ 多步计划（D-043）
+# ==========================================================================
+
+def test_multi_step_continues_after_a_non_aborting_terminal():
+    """第 1 步到位 ⇒ 去派发第 2 步，**且此时不唤醒 Agent**。
+
+    中途唤醒会让 Agent 对着一个"只走了一半"的世界重新规划，
+    而那正是它刚规划过的东西（D-043）。
+    """
+    e = _exec()
+    _submit(e, task_id='p', steps=[Step(ADV, {}), Step(TURN, {})])
+    out = e.on_event('p', ts.ARRIVED)          # 第 1 步的网关任务号就是 'p'
+    assert out.action == ex.DISPATCH_NEXT
+    assert out.step_index == 2
+    assert e.get('p').woken is False
+
+
+@pytest.mark.parametrize('state', [ts.ARRIVED, ts.BLOCKED, ts.TARGET_FOUND, ts.TARGET_LOST])
+def test_multi_step_continues_on_every_non_aborting_terminal(state):
+    """★ **`BLOCKED` 必须继续** —— 脱困计划就是"前进被挡 → 转身 → 再前进"。
+
+    把 `BLOCKED` 当中止，脱困就永远走不到第 2 步。
+    """
+    e = _exec()
+    _submit(e, task_id='p', steps=[Step(ADV, {}), Step(TURN, {})])
+    assert e.on_event('p', state).action == ex.DISPATCH_NEXT
+
+
+@pytest.mark.parametrize('state', [ts.FAILED, ts.CANCELLED])
+def test_multi_step_aborts_immediately_on_failed_or_cancelled(state):
+    e = _exec()
+    _submit(e, task_id='p', steps=[Step(ADV, {}), Step(TURN, {})])
+    out = e.on_event('p', state)
+    assert out.action == ex.WAKE
+    assert out.terminal == state
+    assert e.get('p').woken is True
+
+
+def test_last_step_terminal_ends_the_plan():
+    e = _exec()
+    _submit(e, task_id='p', steps=[Step(ADV, {}), Step(TURN, {})])
+    assert e.on_event('p', ts.ARRIVED).action == ex.DISPATCH_NEXT
+    # 第 2 步由调用方派发后绑回来
+    assert e.bind_step('p', 1, 'p-s2') is True
+    out = e.on_event('p-s2', ts.BLOCKED)
+    assert out.action == ex.WAKE
+    assert out.terminal == ts.BLOCKED
+    assert '最后一步' in out.reason
+
+
+def test_a_late_event_from_an_earlier_step_does_not_advance_the_plan():
+    """迟到的旧步骤事件**不能**推进计划 —— 那会让"第 2 步的终态"去驱动一个
+    已经走到第 3 步的计划。（超时后又被停下来的那次，就会迟到。）"""
+    e = _exec()
+    _submit(e, task_id='p', steps=[Step(ADV, {}), Step(TURN, {}), Step(ADV, {})])
+    e.on_event('p', ts.ARRIVED)                # → 派发第 2 步
+    e.bind_step('p', 1, 'p-s2')
+    e.on_event('p-s2', ts.ARRIVED)             # → 派发第 3 步
+    e.bind_step('p', 2, 'p-s3')
+    late = e.on_event('p-s2', ts.FAILED)       # 第 2 步的迟到终态
+    assert late.action == ex.RECORD
+    assert e.get('p').woken is False
+    assert e.get('p').current == 2             # 还停在第 3 步上
 
 
 # ---------- 超时 ----------
@@ -110,6 +194,31 @@ def test_already_woken_task_never_expires():
     _submit(e, timeout_s=1.0, now=100.0)
     e.on_event('t1', ts.ARRIVED)
     assert e.expired(now=1e9) == []
+
+
+def test_timeout_marks_the_plan_terminal_without_going_through_on_event():
+    """⚠️ 超时不能用 `on_event(plan_id, ...)` 收尾：`on_event` 认的是**当前那一步**
+    的网关任务号，一个走到第 3 步的计划拿第 1 步的号去推进，会**原地不动**
+    —— 表现就是"超时了却永远醒不过来"。"""
+    e = _exec()
+    _submit(e, task_id='p', steps=[Step(ADV, {}), Step(TURN, {})])
+    e.on_event('p', ts.ARRIVED)                # 计划走到第 2 步
+    e.bind_step('p', 1, 'p-s2')
+    assert e.get('p').woken is False
+    assert e.timeout('p') is True
+    assert e.get('p').woken is True
+    assert e.get('p').woken_state == ts.FAILED
+    assert e.timeout('p') is False             # 幂等
+
+
+def test_current_step_task_id_follows_the_plan():
+    """超时要取消的是**当前那一步**，不是计划 id（取消第 1 步等于什么也没停）。"""
+    e = _exec()
+    _submit(e, task_id='p', steps=[Step(ADV, {}), Step(TURN, {})])
+    assert e.current_step_task_id('p') == 'p'
+    e.on_event('p', ts.ARRIVED)
+    e.bind_step('p', 1, 'p-s2')
+    assert e.current_step_task_id('p') == 'p-s2'
 
 
 # ---------- 有界 ----------
@@ -145,3 +254,21 @@ def test_waiting_and_stats():
 def test_capacity_must_be_positive():
     with pytest.raises(ValueError):
         ex.Executor(capacity=0)
+
+
+def test_outcome_carries_the_plan_id_not_the_gateway_task_id():
+    """★ 回归：**端到端第一次就栽在这里**。
+
+    事件里给的是**网关任务号**，而调用方要按**计划 id** 去取记录
+    （派发下一步、读计划里剩下的步骤）。第 2 步之后这两个号**就不同了** ——
+    outcome 不带 `plan_id` 的话，调用方会拿第 2 步的任务号去查计划，
+    查不到，于是**静默不派发下一步**：日志里"计划继续…下一步 第 3 步"打出来了，
+    而第 3 步永远不会发生。
+    """
+    e = _exec()
+    _submit(e, task_id='p', steps=[Step(ADV, {}), Step(TURN, {})])
+    assert e.on_event('p', ts.ARRIVED).plan_id == 'p'
+    e.bind_step('p', 1, 'p-s2')
+    out = e.on_event('p-s2', ts.ARRIVED)
+    assert out.action == ex.WAKE
+    assert out.plan_id == 'p'          # ← **不是** 'p-s2'

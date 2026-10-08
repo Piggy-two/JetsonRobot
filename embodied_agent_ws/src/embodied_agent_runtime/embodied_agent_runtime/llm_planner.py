@@ -53,19 +53,28 @@ class ReplyError(Exception):
 
 SYSTEM_PROMPT = """你是这台机器人的**任务规划模块**。
 
-你能做的事**只有一件**：从下面那份技能清单里选 **一个** 技能，并给出它的参数。
-你不能执行多步计划，不能发明清单以外的技能，也不能产生任何电机/速度指令。
+你能做的事：从下面那份技能清单里选技能并给出参数 —— 可以是**一步**，
+也可以是**一串按执行顺序排列的步骤**（多步计划）。
 
-🔒 绝对不许选择清单以外的名字，尤其不许选控制层或原语层的技能
+**为什么要多步**：有些任务只有组合才能完成，例如
+「往前走，被挡住就换个方向再往前走」= 三个步骤：
+  advance_until_blocked → turn_until_clear → advance_until_blocked
+
+🔒 绝对不许选清单以外的名字，尤其不许选控制层或原语层的技能
 （`control.*` / `primitive.*`）—— 那些是机器人自己的动作原语，不归你调用。
+**多步不是绕过它的办法**：每一步都会被**单独**检查，与第一步的检查完全一样，
+而且**只要有任何一步不合法，整条计划都会被拒**（不会"先做合法的前几步"）。
 
 判断原则：
-- 清单里有能完成用户要求的技能 → 选它；参数按清单里给的单位与取值范围给。
-- 没有 → **如实拒绝**并说明缺什么能力。宁可说"做不到"，也不要硬凑一个。
+- **一步能做完就只给一步** —— 不要为了显得聪明而硬凑成多步。
+- 需要组合时，按**实际执行顺序**列出，参数按清单里给的单位与取值范围给。
+- 步骤之间**不要写条件、不要写「如果…就…」**：运行时就是按顺序执行，
+  某一步失败（FAILED/CANCELLED）会**自动中止**整条计划，其余终态则继续下一步。
+- 做不到 → **如实拒绝**并说明缺什么能力。宁可说"做不到"，也不要硬凑。
 
 只输出**一个 JSON 对象**，不要解释、不要 Markdown 代码块：
-  选中时：{"skill": "<技能名>", "args": {<参数名>: <数值>, ...}}
-  拒绝时：{"refuse": "<一句话理由>"}
+  计划：{"steps": [{"skill": "<技能名>", "args": {<参数名>: <数值>}}, ...]}
+  拒绝：{"refuse": "<一句话理由>"}
 """
 
 
@@ -119,9 +128,15 @@ def _strip_code_fence(raw):
 
 
 def parse_reply(raw):
-    """把回包读成 `('skill', (名字, 参数))` 或 `('refuse', 理由)`。
+    """把回包读成 `('steps', [{'skill':…, 'args':…}, …])` 或 `('refuse', 理由)`。
 
-    :raises ReplyError: 不是 JSON / 不是对象 / 两个键都没有 / 类型不对
+    **一步与多步用同一个形状**（`steps` 是长度为 1 的列表）—— 少一个分支，
+    也少一处"单步走这条路、多步走那条路"从而严格度分家的机会。
+
+    ⚠️ 仍然接受旧的 `{"skill": …}` 写法：**解析要宽，校验才严**
+    （模型不一定听劝，而"它没按格式来"不该表现为"整件事做不了"）。
+
+    :raises ReplyError: 不是 JSON / 不是对象 / 三种键都没有 / 类型不对
                         （**异常里带着原始回包**）
     """
     try:
@@ -145,15 +160,35 @@ def _parse_reply(raw):
             raise ReplyError('refuse 字段是空的')
         return 'refuse', why.strip()
 
-    if 'skill' not in obj:
-        raise ReplyError(f'既没有 skill 也没有 refuse（收到：{sorted(obj)}）')
-    skill = obj['skill']
-    if not isinstance(skill, str) or not skill.strip():
-        raise ReplyError('skill 字段不是非空字符串')
-    args = obj.get('args', {})
-    if not isinstance(args, dict):
-        raise ReplyError(f'args 必须是 object，是 {type(args).__name__}')
-    return 'skill', (skill.strip(), args)
+    if 'steps' in obj:
+        steps = obj['steps']
+        if not isinstance(steps, list):
+            raise ReplyError(f'steps 必须是数组，是 {type(steps).__name__}')
+        if not steps:
+            raise ReplyError('steps 是空数组 —— 要么给至少一步，要么用 refuse 明确拒绝')
+        out = []
+        for i, st in enumerate(steps, 1):
+            if not isinstance(st, dict):
+                raise ReplyError(f'第 {i} 步不是 object，是 {type(st).__name__}')
+            skill = st.get('skill')
+            if not isinstance(skill, str) or not skill.strip():
+                raise ReplyError(f'第 {i} 步的 skill 不是非空字符串')
+            args = st.get('args', {})
+            if not isinstance(args, dict):
+                raise ReplyError(f'第 {i} 步的 args 必须是 object，是 {type(args).__name__}')
+            out.append({'skill': skill.strip(), 'args': args})
+        return 'steps', out
+
+    if 'skill' in obj:                     # 旧的单步写法，仍然接受
+        skill = obj['skill']
+        if not isinstance(skill, str) or not skill.strip():
+            raise ReplyError('skill 字段不是非空字符串')
+        args = obj.get('args', {})
+        if not isinstance(args, dict):
+            raise ReplyError(f'args 必须是 object，是 {type(args).__name__}')
+        return 'steps', [{'skill': skill.strip(), 'args': args}]
+
+    raise ReplyError(f'既没有 steps / skill 也没有 refuse（收到：{sorted(obj)}）')
 
 
 def plan_with_llm(text, registry, client):
@@ -170,10 +205,11 @@ def plan_with_llm(text, registry, client):
         exc.raw = raw                     # 原文带上，别让它烂在这里
         raise
     if kind == 'refuse':
-        return planner.PlanResult(False, None, {}, f'LLM 判断做不了：{payload}'), raw
-    skill, args = payload
-    # ★ 与规则表**同一个** `accept_skill` —— 红线、注册表、参数校验一次都不少。
-    return planner.accept_skill(skill, args, registry, 'LLM'), raw
+        return planner.PlanResult(False, [], f'LLM 判断做不了：{payload}'), raw
+    steps = payload
+    # ★ 与规则表**同一个**校验口（`accept_plan` 内部逐步调 `accept_skill`）——
+    #   红线、注册表、参数校验，**每一步**都一次不少；任何一步不合法则整条被拒。
+    return planner.accept_plan(steps, registry, 'LLM'), raw
 
 
 def plan_task(text, rules, registry, client, guard=None):
@@ -204,27 +240,27 @@ def plan_task(text, rules, registry, client, guard=None):
 
     if client is None:
         why = f'{result.reason}，且 {REFUSE_LLM_DISABLED}'
-        return Composed(planner.PlanResult(False, None, {}, why), SOURCE_NONE, '')
+        return Composed(planner.PlanResult(False, [], why), SOURCE_NONE, '')
 
     held = False
     if guard is not None:
         held = guard.acquire(blocking=False)
         if not held:
-            return Composed(planner.PlanResult(False, None, {}, REFUSE_LLM_BUSY),
+            return Composed(planner.PlanResult(False, [], REFUSE_LLM_BUSY),
                             SOURCE_NONE, '')
     try:
         try:
             result, raw = plan_with_llm(text, registry, client)
         except LlmUnavailable as exc:
             why = f'{result.reason}，且 LLM 不可用：{exc}'
-            return Composed(planner.PlanResult(False, None, {}, why), SOURCE_NONE, '')
+            return Composed(planner.PlanResult(False, [], why), SOURCE_NONE, '')
         except LlmTransportError as exc:
             why = (f'{result.reason}；LLM 调用失败'
                    f'（上限 {client.timeout_s:g}s）：{exc}')
-            return Composed(planner.PlanResult(False, None, {}, why), SOURCE_LLM, '')
+            return Composed(planner.PlanResult(False, [], why), SOURCE_LLM, '')
         except ReplyError as exc:
             why = f'{result.reason}；LLM 回包无法解析：{exc}（原始回包已记入日志）'
-            return Composed(planner.PlanResult(False, None, {}, why), SOURCE_LLM,
+            return Composed(planner.PlanResult(False, [], why), SOURCE_LLM,
                             exc.raw)
         return Composed(result, SOURCE_LLM, raw)
     finally:

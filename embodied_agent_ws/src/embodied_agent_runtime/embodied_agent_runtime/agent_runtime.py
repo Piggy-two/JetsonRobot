@@ -58,6 +58,7 @@ from embodied_agent_runtime.memory import AgentMemory
 
 # 网关的注册表是"有哪些技能"的唯一事实来源 —— 本节点直接读**同一份数据**，
 # 而不是再抄一份技能名单（抄一份就会漂移）。D-029：Registry 是数据。
+from embodied_skill_gateway import task_state as ts
 from embodied_skill_gateway.registry import Registry
 
 
@@ -215,11 +216,14 @@ class AgentRuntime(Node):
             raise RuntimeError(f'规则表顶层必须是 mapping，得到 {type(data).__name__}')
         rules = data.get('rules', data)
         if not isinstance(rules, dict):
-            raise RuntimeError('规则表的 rules 必须是 mapping（文本 → {skill, args}）')
+            raise RuntimeError('规则表的 rules 必须是 mapping（文本 → 规则）')
         for text, rule in rules.items():
-            if not isinstance(rule, dict) or 'skill' not in rule:
-                raise RuntimeError(f'规则 {text!r} 必须是一个含 skill 的 mapping，'
-                                   f'得到 {rule!r}')
+            # ⚠️ 校验**复用 planner 里那个判定函数**，不在这里另写一份 ——
+            #    否则"加载时认为合法的写法"与"规划时认为合法的写法"会分家，
+            #    而症状是启动时报错、或反过来启动不报错却永远规划不出来。
+            steps, why = planner._steps_from_rule(rule)
+            if steps is None:
+                raise RuntimeError(f'规则 {text!r} 不合法：{why}（得到 {rule!r}）')
         return rules
 
     # ---------- 入口 ----------
@@ -241,7 +245,7 @@ class AgentRuntime(Node):
         # 模型说了什么必须留得下来 —— 拒绝理由面向人，原文面向排查。
         self.get_logger().info(
             f'规划 {req.text!r} → {source}｜{elapsed * 1000:.0f} ms｜'
-            f'{"接受 " + str(result.skill) if result.accepted else "拒绝 " + result.reason}')
+            f'{"接受 " + self._plan_label(result.steps) if result.accepted else "拒绝 " + result.reason}')
         if raw:
             # 截断，但留足能看出它在胡说多少的长度
             self.get_logger().info(f'LLM 原始回包：{raw[:500]!r}')
@@ -254,50 +258,40 @@ class AgentRuntime(Node):
             self.get_logger().warn(f'拒绝任务 {req.text!r}：{result.reason}')
             return res
 
-        spec = self.registry.get(result.skill)
-        if spec.causes_motion and not self.get_parameter('allow_motion').value:
+        # 每一步都要过 `allow_motion` 闸门：**只要任何一步会引起运动**，
+        # 整条计划都要显式放行才派发（闸门③，D-033）。
+        movers = [s.skill for s in result.steps
+                  if getattr(self.registry.get(s.skill), 'causes_motion', False)]
+        if movers and not self.get_parameter('allow_motion').value:
             res.accepted = False
             res.message = (f'allow_motion=false —— 拒绝派发可能引起运动的技能 '
-                           f'{result.skill}（打开请显式 allow_motion:=true）')
+                           f'{movers}（打开请显式 allow_motion:=true）')
             self.get_logger().warn(res.message)
             return res
 
-        invoke = SkillInvoke.Request()
-        invoke.principal = 'agent.planner'
-        invoke.skill = result.skill
-        invoke.args_json = json.dumps(result.args, ensure_ascii=False)
-        invoke.request_id = req.request_id
-
-        if not self._gateway_cli.wait_for_service(
-                timeout_sec=float(self.get_parameter('service_wait_timeout').value)):
+        # 派发第 1 步。**计划 id 就用第 1 步的网关任务号**：
+        # 这样单步计划与从前**完全一致**（同一个 id、同一条事件、同一套回归），
+        # 多步计划多出来的只是"后续步骤也绑在同一个计划上"（D-043）。
+        reply, why = self._dispatch_step(result.steps[0], req.request_id)
+        if reply is None:
             res.accepted = False
-            res.message = 'Skill 网关不可用 —— 任务无处可去'
+            res.message = why
             self.get_logger().error(res.message)
             return res
-
-        future = self._gateway_cli.call_async(invoke)
-        wait = float(self.get_parameter('service_wait_timeout').value)
-        deadline = time.monotonic() + wait
-        while not future.done() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not future.done():
-            res.accepted = False
-            res.message = '网关受理超时'
-            self.get_logger().error(res.message)
-            return res
-
-        reply = future.result()
         if not reply.accepted:
             res.accepted = False
             res.message = f'网关拒绝：{reply.message}'
-            self.memory.remember_submission('', result.skill, req.principal,
+            self.memory.remember_submission('', result.steps[0].skill, req.principal,
                                             False, reply.message, now=time.monotonic())
             self.get_logger().warn(res.message)
             return res
 
         with self._lock:
-            rec = self._executor.submit(reply.task_id, result.skill,
-                                        'agent.planner', reply.timeout_s)
+            rec = self._executor.submit_plan(reply.task_id, result.steps,
+                                             'agent.planner', reply.timeout_s)
+            if rec is not None:
+                # 把网关任务号绑到第 1 步上 —— 不绑就认不出它的事件（见 execution.py）
+                self._executor.bind_step(reply.task_id, 0, reply.task_id)
         if rec is None:
             # 记不上就**去取消** —— 否则会有一个任务在跑而没人跟踪它。
             res.accepted = False
@@ -306,40 +300,86 @@ class AgentRuntime(Node):
             self._request_cancel(reply.task_id, 'Agent 侧无法跟踪')
             return res
 
-        self.memory.remember_submission(reply.task_id, result.skill, req.principal,
-                                        True, '', now=time.monotonic())
+        self.memory.remember_submission(reply.task_id, self._plan_label(result.steps),
+                                        req.principal, True, '',
+                                        now=time.monotonic())
         res.accepted = True
         res.task_id = reply.task_id
-        res.message = f'已受理并派发 {result.skill}（处于 WAIT，事件到达时唤醒）'
+        n = len(result.steps)
+        res.message = (f'已受理并派发 {result.steps[0].skill}'
+                       f'（{"单步" if n == 1 else f"共 {n} 步，第 1 步已派发"}；'
+                       f'处于 WAIT，事件到达时唤醒）')
         self.get_logger().info(
-            f'受理 {reply.task_id}：{result.skill} {result.args} —— 进入 WAIT')
+            f'受理 {reply.task_id}：{self._plan_label(result.steps)} —— 进入 WAIT')
 
         # 把网关给的超时也纳入本节点的兜底扫描：**谁受理谁负责收尾**。
         rec.deadline = min(rec.deadline, time.monotonic() + reply.timeout_s + 5.0)
         return res
 
+    # ---------- 派发 ----------
+
+    @staticmethod
+    def _plan_label(steps):
+        """计划在人看的地方长什么样：`A → B → C`。单步就是 `A`。"""
+        return ' → '.join(s.skill for s in steps)
+
+    def _dispatch_step(self, step, request_id):
+        """把**一步**交给网关。返回 `(reply, 失败原因)`；失败时 reply 为 None。
+
+        ⚠️ 每一步都走**同一个** `~/invoke` —— 多步没有旁路，
+        第 2 步的六项检查与第 1 步一模一样。
+        """
+        invoke = SkillInvoke.Request()
+        invoke.principal = 'agent.planner'
+        invoke.skill = step.skill
+        invoke.args_json = json.dumps(step.args, ensure_ascii=False)
+        invoke.request_id = request_id
+
+        wait = float(self.get_parameter('service_wait_timeout').value)
+        if not self._gateway_cli.wait_for_service(timeout_sec=wait):
+            return None, 'Skill 网关不可用 —— 任务无处可去'
+
+        future = self._gateway_cli.call_async(invoke)
+        deadline = time.monotonic() + wait
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return None, f'网关受理超时（{step.skill}）'
+        return future.result(), ''
+
     # ---------- 事件 ----------
 
     def on_event(self, msg):
         with self._lock:
-            verdict = self._executor.on_event(msg.task_id, msg.state)
-        if verdict == execution.IGNORE:
+            outcome = self._executor.on_event(msg.task_id, msg.state)
+        if outcome.action == execution.IGNORE:
             return
-        if verdict == execution.RECORD:
+        if outcome.action == execution.RECORD:
             self.get_logger().debug(
-                f'{msg.task_id} -> {msg.state}（非任务级终态，不唤醒）')
+                f'{msg.task_id} -> {msg.state}（{outcome.reason or "非任务级终态"}）')
             return
-        if verdict == execution.DUPLICATE:
+        if outcome.action == execution.DUPLICATE:
             self.get_logger().warn(
                 f'{msg.task_id} 又收到一个终态 {msg.state} —— 忽略（不重复唤醒）')
             return
 
-        rec = self._executor.get(msg.task_id)
-        self.memory.remember_wakeup(msg.task_id, msg.skill, msg.state, msg.detail,
+        # ★ 还有下一步：**去派发它**，此时**不唤醒** Agent（D-043）。
+        if outcome.action == execution.DISPATCH_NEXT:
+            self.get_logger().info(
+                f'计划继续：{outcome.reason}｜下一步 第 {outcome.step_index} 步')
+            # ⚠️ 用 **outcome.plan_id**，不是 msg.task_id ——
+            #    后者是**网关任务号**，第 2 步之后就不是计划 id 了。
+            self._dispatch_next(outcome.plan_id, outcome.step_index)
+            return
+
+        # ---- 到这里就是**计划级终态**：唤醒 Agent 一次 ----
+        rec = self._executor.get(outcome.plan_id)
+        plan = list(rec.steps) if rec is not None else []
+        self.memory.remember_wakeup(outcome.plan_id, msg.skill, msg.state, msg.detail,
                                     now=time.monotonic())
         self.get_logger().error(
-            f'★ 唤醒 Agent：{msg.task_id}｜{msg.skill}｜{msg.state}｜{msg.detail}'
-            f'｜verified={msg.verified}')
+            f'★ 唤醒 Agent：{outcome.plan_id}｜{self._plan_label(plan) if plan else msg.skill}'
+            f'｜{msg.state}｜{outcome.reason or msg.detail}｜verified={msg.verified}')
         self.get_logger().warn(
             '⚠️ 本版**没有重规划**（Phase 7 才接 LLM）—— 到这里为止：'
             'Agent 知道任务终止了、终止在什么状态')
@@ -348,6 +388,35 @@ class AgentRuntime(Node):
                 f'⚠️ {msg.state} 是**技能自报**的，未经独立反馈确认'
                 f'（verified=false）—— 不要把它读成"已经到位"')
 
+    def _dispatch_next(self, plan_id, step_index):
+        """派发计划里的下一 步（`step_index` 是**人看的序号**，1 起）。"""
+        rec = self._executor.get(plan_id)
+        if rec is None:
+            return
+        idx = step_index - 1
+        if not (0 <= idx < rec.total):
+            self.get_logger().error(f'计划 {plan_id} 没有第 {step_index} 步')
+            return
+        step = rec.steps[idx]
+        reply, why = self._dispatch_step(step, f'{plan_id}-s{step_index}')
+        if reply is None or not reply.accepted:
+            # ⚠️ 后续步骤派不出去 ⇒ **整条计划到此为止**，而且必须**唤醒 Agent**：
+            #    不唤醒就会有一条计划永远挂在 WAIT 里（超时兜底会收它，但那是兜底）。
+            reason = why or getattr(reply, 'message', '被网关拒绝')
+            with self._lock:
+                self._executor.cancel(plan_id)
+            self.get_logger().error(
+                f'★ 计划 {plan_id} 的第 {step_index} 步派发失败：{reason}'
+                f' —— 计划中止并唤醒 Agent')
+            self.memory.remember_wakeup(plan_id, step.skill, ts.FAILED, reason,
+                                        now=time.monotonic())
+            return
+        with self._lock:
+            self._executor.bind_step(plan_id, idx, reply.task_id)
+        self.get_logger().info(
+            f'计划 {plan_id}：第 {step_index} 步已派发 {step.skill}'
+            f'（网关任务 {reply.task_id}）')
+
     # ---------- 超时兜底 ----------
 
     def sweep(self):
@@ -355,12 +424,17 @@ class AgentRuntime(Node):
         with self._lock:
             overdue = self._executor.expired()
         for rec in overdue:
+            with self._lock:
+                # 要取消的是**当前那一步**在网关那边的任务，不是计划 id ——
+                # 走到第 3 步时，计划 id 指的是第 1 步，取消它等于什么也没停。
+                step_task = self._executor.current_step_task_id(rec.task_id)
             self.get_logger().error(
                 f'{rec.task_id} 超过 {rec.deadline - rec.submitted_at:.1f}s 仍无终态 '
+                f'（停在第 {rec.current + 1}/{rec.total} 步）'
                 f'—— 请求取消技能（**不**当作已完成）')
-            self._request_cancel(rec.task_id, 'Agent 侧超时')
+            self._request_cancel(step_task, 'Agent 侧超时')
             with self._lock:
-                self._executor.on_event(rec.task_id, 'FAILED')
+                self._executor.timeout(rec.task_id)
         self._publish_status()
 
     def _request_cancel(self, task_id, reason):
