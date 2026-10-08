@@ -152,7 +152,7 @@ ros2 action list
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| **Phase 0** | 环境与硬件启动验收（底盘 / LiDAR / 相机 / 麦克风 / 扬声器 + 接口清单） | 🚧 **进行中**（LiDAR ✅ / 底盘运动 ✅ / 通信中断 ✅ / **相机 ✅ 已完全收口** / **语音音频硬件 ✅**；⚠️ **语音唤醒实测不通**、急停链路用户已暂缓） |
+| **Phase 0** | 环境与硬件启动验收（底盘 / LiDAR / 相机 / 麦克风 / 扬声器 + 接口清单） | ✅ **已完成（2026-10-08，带两条例外）**（LiDAR ✅ / 底盘运动 ✅ / 通信中断 ✅ / **相机 ✅ 已完全收口** / **语音音频硬件 ✅**；⚠️ **语音唤醒实测不通**、急停链路用户已暂缓） |
 | **Phase 1** | Driver / Primitive（Camera / Motor / LiDAR Driver） | 🚧 **已开始** —— **相机 Driver ✅ 无遗留**（`embodied_camera_driver`，D-023）；**电机 Driver ✅ 已落地、干跑 + 链路失联 + 安全层否决验证通过**（`embodied_motor_driver`，**D-025** + **D-037**，含**失联检测/告警/恢复后拒绝静默复动**、**直接读安全层状态并在它锁存时自己输出零**（**安全层不在跑则拒绝运动**）；**默认 `dry_run=true` 不驱动底盘**；真机运动测试待人工看护时做）；**LiDAR Primitive ✅ 已落地**（`embodied_lidar_driver`，**D-028** —— 厂商 `/scan` 本身是对的，故做**查询原语**而非收口：扇区最近距离 / 通畅判定；对真实雷达独立重算交叉验证**逐位一致**）。**Phase 1 三个 Driver 齐了** |
 | Phase 2 | Robot Control（`move_forward` / `rotate` / `move_relative` / `stop`） | 🚧 **已开始** —— `embodied_control_skills` 落地 `move_relative` / `rotate` / `stop`（**D-026**，Service 接口 + 项目自己的 `.srv`），**干跑验证 16/16 通过**（用**速度积分**量位移，车不动）。⚠️ **第一版是开环**：`success` = "速度按时长发完了"，**不是走到位**。**2026-10-07 起控制动作多走一跳 `embodied_skill_gateway`**（D-029/D-031：六项检查，**没有旁路**） |
 | Phase 3 | Autonomous Skills（SLAM / Navigation / 避障 / `follow_person` / `follow_line`） | 🚧 **已开始**（**D-034**）：第一个 task-tier 技能 `advance_until_blocked`（**闭环**，每步重新问 LiDAR），**第一次让 8 状态机跑起来**。⚠️ 未真机验证；`navigate_to` 类能力仍缺 **SLAM / 导航栈** |
