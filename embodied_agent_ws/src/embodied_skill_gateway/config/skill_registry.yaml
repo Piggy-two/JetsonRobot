@@ -134,3 +134,27 @@ skills:
       #    近场回波占比在 3.6% 与 67% 之间摆动。拍一个数一定会被场地否决。
       - {name: clear_range, type: float, unit: 'm', min: 0.1, max: 1.0}
       - {name: step, type: float, unit: 'm', min: 0.02, max: 0.2}
+
+  autonomous.turn_until_clear:
+    tier: task
+    description: 原地逐步转，直到前方通畅或转满上限。**闭环**：每转一步都重新问一次 LiDAR。
+    transport: service
+    target: /autonomous_skills/turn_until_clear
+    srv_type: embodied_skills_interfaces/TurnUntilClear
+    # 与 advance 同量级：最多转半圈、每步都要一次雷达往返。
+    timeout_s: 45.0
+    cancel_target: /autonomous_skills/cancel
+    causes_motion: true
+    allowed_principals:
+      - agent.planner        # ★ task-tier **应当**允许 Agent 调用（D-003 的那一层）
+      - operator.manual
+    params:
+      # ⚠️ 上限取 π：单次 `rotate` 的底层上限就是它，转超过半圈方向就没意义了。
+      - {name: max_angle, type: float, unit: 'rad', min: 0.1, max: 3.141592653589793}
+      - {name: clear_range, type: float, unit: 'm', min: 0.1, max: 1.0}
+      - {name: step_angle, type: float, unit: 'rad', min: 0.05, max: 1.5707963267948966}
+      # ⚠️ **这个字段网关校验不了**：只接受 +1 / -1，而注册表只支持 min/max 区间
+      #    —— 写成 [-1, 1] 会放行 0 和 0.5。所以精确约束落在技能自己的
+      #    `turn_plan.validate()` 里（有单测）。这是**已知的校验缝隙**，不是疏忽：
+      #    上不了注册表的东西必须在下一层挡住，而不是"网关没管就没人管"。
+      - {name: direction, type: float, unit: '', min: -1.0, max: 1.0}

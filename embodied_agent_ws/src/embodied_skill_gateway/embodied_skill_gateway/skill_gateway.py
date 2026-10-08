@@ -63,7 +63,7 @@ from std_srvs.srv import Trigger
 from embodied_skills_interfaces.msg import SkillEvent
 from embodied_skills_interfaces.srv import (
     AdvanceUntilBlocked, MoveRelative, PathClear, Rotate, SectorMinRange,
-    SkillCancel, SkillInvoke, SkillList, SkillResult)
+    SkillCancel, SkillInvoke, SkillList, SkillResult, TurnUntilClear)
 
 from embodied_skill_gateway import checks, task_state
 from embodied_skill_gateway.registry import Registry
@@ -77,6 +77,7 @@ _SRV_TYPES = {
     'embodied_skills_interfaces/SectorMinRange': SectorMinRange,
     'embodied_skills_interfaces/PathClear': PathClear,
     'embodied_skills_interfaces/AdvanceUntilBlocked': AdvanceUntilBlocked,
+    'embodied_skills_interfaces/TurnUntilClear': TurnUntilClear,
     'std_srvs/Trigger': Trigger,
 }
 

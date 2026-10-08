@@ -45,10 +45,11 @@ from rclpy.node import Node
 from std_srvs.srv import Trigger
 
 from embodied_skills_interfaces.srv import (
-    AdvanceUntilBlocked, MoveRelative, PathClear)
+    AdvanceUntilBlocked, MoveRelative, PathClear, Rotate, TurnUntilClear)
 
 from embodied_autonomous_skills.advance_plan import (
     AdvancePlanError, decide, summarize, validate)
+from embodied_autonomous_skills import turn_plan
 from embodied_skill_gateway import task_state as ts
 
 
@@ -58,6 +59,7 @@ class AutonomousSkills(Node):
 
         self.declare_parameter('path_clear_service', '/lidar_driver/path_clear')
         self.declare_parameter('move_service', '/control_skills/move_relative')
+        self.declare_parameter('rotate_service', '/control_skills/rotate')
         self.declare_parameter('stop_service', '/control_skills/stop')
         self.declare_parameter('service_wait_timeout', 3.0)
         self.declare_parameter('sub_call_timeout', 12.0)
@@ -75,17 +77,23 @@ class AutonomousSkills(Node):
             PathClear, g('path_clear_service'), callback_group=self._srv_group)
         self._move_cli = self.create_client(
             MoveRelative, g('move_service'), callback_group=self._srv_group)
+        self._rotate_cli = self.create_client(
+            Rotate, g('rotate_service'), callback_group=self._srv_group)
         self._stop_cli = self.create_client(
             Trigger, g('stop_service'), callback_group=self._srv_group)
 
         self.create_service(AdvanceUntilBlocked, '~/advance_until_blocked',
                             self.on_advance, callback_group=self._srv_group)
+        self.create_service(TurnUntilClear, '~/turn_until_clear',
+                            self.on_turn, callback_group=self._srv_group)
         self.create_service(Trigger, '~/cancel', self.on_cancel,
                             callback_group=self._srv_group)
 
         self.get_logger().info(
-            f'Autonomous Skill 启动 | 看 <- {g("path_clear_service")} | '
-            f'动 -> {g("move_service")} | 扇区全宽 {g("sector_width"):.3f} rad')
+            f'Autonomous Skill 启动 | 服务 ~/advance_until_blocked、~/turn_until_clear、~/cancel | '
+            f'看 <- {g("path_clear_service")} | '
+            f'动 -> {g("move_service")} 与 {g("rotate_service")} | '
+            f'扇区全宽 {g("sector_width"):.3f} rad')
         self.get_logger().warn(
             '⚠️ 本技能**未在真机上验证过**（车从未这样走过）。'
             '受网关 allow_motion 闸门约束（D-033）')
@@ -143,6 +151,45 @@ class AutonomousSkills(Node):
         res.travelled = travelled
         self.get_logger().info(
             f'{state}：{message} | 自报前进 {travelled:.3f} m / 耗时 {res.elapsed:.2f}s')
+        return res
+
+    def on_turn(self, req, res):
+        """`turn_until_clear`：原地逐步转，直到前方通畅或转满上限。"""
+        with self._lock:
+            if self._busy:
+                res.success = False
+                res.state = ts.FAILED
+                res.message = '已有一个动作在执行（本层一次只跑一个，不排队）'
+                self.get_logger().warn(res.message)
+                return res
+            self._busy = True
+            self._cancel = False
+
+        started = time.monotonic()
+        try:
+            try:
+                turn_plan.validate(req.max_angle, req.clear_range,
+                                   req.step_angle, req.direction)
+            except turn_plan.TurnPlanError as e:
+                res.success = False
+                res.state = ts.FAILED
+                res.message = f'参数不可接受：{e}'
+                self.get_logger().warn(res.message)
+                return res
+
+            state, message, heading = self._turn(
+                req.max_angle, req.clear_range, req.step_angle, req.direction)
+        finally:
+            with self._lock:
+                self._busy = False
+
+        res.success = (state == ts.ARRIVED)
+        res.state = state
+        res.message = message
+        res.elapsed = time.monotonic() - started
+        res.heading = heading
+        self.get_logger().info(
+            f'{state}：{message} | 耗时 {res.elapsed:.2f}s')
         return res
 
     # ---------- 主循环 ----------
@@ -206,6 +253,64 @@ class AutonomousSkills(Node):
 
     # ---------- 工具 ----------
 
+    def _turn(self, max_angle, clear_range, step_angle, direction):
+        """逐步转。返回 (终态, 说明, 朝向)。
+
+        ⚠️ **每一步都重新问一次雷达** —— 这正是它算 Autonomous 而不是 Control 的原因。
+        朝向是**开环累加**（只累加真的转成功的步），未经独立校验。
+        """
+        remaining = float(max_angle)
+        heading = 0.0
+        width = float(self.get_parameter('sector_width').value)
+        wait = float(self.get_parameter('service_wait_timeout').value)
+
+        while True:
+            if self._cancelled():
+                return (ts.CANCELLED, turn_plan.summarize(heading, '被取消'), heading)
+
+            if not self._clear_cli.wait_for_service(timeout_sec=wait):
+                return (ts.FAILED, turn_plan.summarize(
+                    heading, '雷达服务不可用 —— 无法判断前方，因此不转'), heading)
+
+            req = PathClear.Request()
+            req.width = width
+            req.clear_range = float(clear_range)
+            clear, range_m, _angle = self._call(self._clear_cli, req)
+            if clear is None:
+                return (ts.FAILED, turn_plan.summarize(
+                    heading, '前方查询无返回 —— 不知道 ≠ 受阻，因此不转'), heading)
+
+            d = turn_plan.decide(clear, range_m, clear_range,
+                                 remaining, step_angle, direction)
+            if d.action != 'turn':
+                return (d.terminal, turn_plan.summarize(heading, d.note), heading)
+
+            turned, why = self._rotate(d.angle)
+            if not turned:
+                return (ts.FAILED, turn_plan.summarize(
+                    heading, f'转身失败：{why}'), heading)
+
+            heading += d.angle
+            remaining -= abs(d.angle)
+
+    def _rotate(self, angle):
+        """转一步（带符号）。返回 (是否成功, 原因)。"""
+        if not self._rotate_cli.wait_for_service(
+                timeout_sec=float(self.get_parameter('service_wait_timeout').value)):
+            return False, 'Control Skill 的 rotate 不可用'
+        if self._cancelled():
+            return False, '已被取消'
+
+        req = Rotate.Request()
+        req.angle = float(angle)
+        ok, msg, _elapsed = self._call(self._rotate_cli, req)
+        if ok is None:
+            return False, '调用无返回'
+        if not ok:
+            # 原样转述 Control Skill 的原因，不要自己编一个（与 _step 同）。
+            return False, msg or 'Control Skill 拒绝'
+        return True, ''
+
     def _cancelled(self):
         with self._lock:
             return self._cancel
@@ -229,7 +334,8 @@ class AutonomousSkills(Node):
             return (None, None, None)
         if isinstance(r, PathClear.Response):
             return r.clear, r.range, r.angle
-        if isinstance(r, MoveRelative.Response):
+        # MoveRelative 与 Rotate 的回包形状相同（success / message / elapsed）
+        if isinstance(r, (MoveRelative.Response, Rotate.Response)):
             return r.success, r.message, r.elapsed
         return (None, None, None)
 
