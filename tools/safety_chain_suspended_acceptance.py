@@ -23,6 +23,11 @@
     --phase direction  验守卫的**方向性**：先问四个方向各有多远，然后
                    往**通畅**方向走（**必须放行**）+ 往**受阻**方向走（**必须拦下**）做对照。
                    ⇒ 一个什么都拦的守卫会被关掉，等于没有；这一条防的是那个。
+                   ⚠️ **摆位有硬要求（两个方向都得有）**：至少一个方向 > 0.40 m 是空的，
+                   **且**至少一个方向 ≤ 0.225 m 有东西 —— 后者用守卫**真实的**阈值
+                   （`min(1.0, max(0.20, 0.15×1.5))`），不是随手拍的数。缺任一边即**拒测**
+                   （只验"放行"等于把"守卫是不是一刀切"放过去了）。
+                   跑之前可用 `--phase direction --dry-classify` 先量一遍摆位。
 
 配置 A（跑 `--phase veto`）—— **注意 `motor_stop_service` 指向不存在的服务**
 --------------------------------------------------------
@@ -373,27 +378,74 @@ DIRECTIONS = [
     ('后', 3.141592653589793, dict(x=-0.3, y=0.0)),
 ]
 
-#: 守卫在 0.15 m/s 下的阈值 = max(0.20, 0.15×1.5) = 0.225 m；
-#: 判"这个方向确实通畅"要求最近回波比它再远 1.5 倍以上，别贴着阈值下结论。
+# ── 判据的两个端：**必须与守卫的真实阈值同源**，否则会出一个死区 ──────────────
+# 守卫（`obstacle_guard.GuardConfig`）算的是
+#     stop_range = min(max_range, max(min_range, 速度 × lookahead))
+# 并且它是**带着 max_range = stop_range 去问服务**的 —— 比它远的回波根本不返回
+# （`obstacle_guard.py` 里 `evaluate()` 的那条注释）。所以在 0.15 m/s 下：
+#     stop_range = min(1.00, max(0.20, 0.15 × 1.5)) = 0.225 m
+# ⚠️ 工装第一版只写了一个 `CLEAR_MARGIN = 0.40`，**两端共用** —— 于是
+#     (0.225, 0.40] 这一段成了死区：工装判它"受阻、守卫该拦"，
+#     而守卫带着 0.225 去问，看不到它，**不会拦**。把障碍物放 0.3 m 就会假失败。
+#     本版把"受阻"的上界改回守卫的真实阈值（**这是收紧，不是放行**）。
+SKILL_SPEED = 0.15          # Control Skill 的 `nominal_speed` 默认值 —— 本工装用它走
+GUARD_MIN_RANGE = 0.20      # 守卫的 `min_range` 默认值
+GUARD_LOOKAHEAD = 1.5       # 守卫的 `lookahead` 默认值
+GUARD_MAX_RANGE = 1.00      # 守卫的 `max_range` 默认值
+GUARD_STOP_RANGE = min(GUARD_MAX_RANGE, max(GUARD_MIN_RANGE, SKILL_SPEED * GUARD_LOOKAHEAD))
+
+#: 判"这个方向确实通畅"要离阈值足够远 —— 别贴着阈值下结论（0.40 ≈ 阈值的 1.8 倍）。
+#: 这个数**只用于"通畅"这一端**，不再兼任"受阻"的上界。
 CLEAR_MARGIN = 0.40
+
+
+def classify_directions(probed):
+    """把四个方向的读数分成（通畅，受阻）两类。**纯函数，便于单独证伪。**
+
+    `probed` 是 [(名字, 中心角, 请求, 距离, 角度), ...]；距离 < 0 表示该扇区无回波。
+
+      · **通畅**：1 m 内没有回波（`< 0`，那就是真没有东西），或最近回波 > `CLEAR_MARGIN`；
+      · **受阻**：最近回波 ≤ `GUARD_STOP_RANGE` —— 用守卫**真实的**阈值，
+        否则会出现"工装说该拦、守卫看不见"的死区（见上方说明）。
+    """
+    clear = [p for p in probed
+             if p[3] is not None and (p[3] < 0 or p[3] > CLEAR_MARGIN)]
+    blocked = [p for p in probed
+               if p[3] is not None and 0.0 < p[3] <= GUARD_STOP_RANGE]
+    return clear, blocked
+
+
+def probe_four_directions(node):
+    """问四个方向的最近回波并打印读数。**纯查询，不驱动任何东西。** 返回 probed。"""
+    print(f'     守卫在 {SKILL_SPEED} m/s 下的真实阈值 = {GUARD_STOP_RANGE:.3f} m；'
+          f'判"通畅"要 > {CLEAR_MARGIN} m（留余量，别贴着阈值下结论）')
+    probed = []
+    for name, center, move in DIRECTIONS:
+        r, a = probe_direction(node, center)
+        probed.append((name, center, move, r, a))
+        if r is None:
+            shown, verdict = '（超时）', '⬜ 没问到'
+        elif r < 0:
+            shown, verdict = '（无回波）', '✅ 通畅'
+        else:
+            shown = f'{r:.3f} m'
+            verdict = ('✅ 通畅' if r > CLEAR_MARGIN else
+                       '❌ 受阻' if r <= GUARD_STOP_RANGE else
+                       '⚠️ 灰区（比通畅余量近、守卫却看不到）')
+        print(f'    {name}（中心 {center * 57.29578:+.0f}°）：最近回波 {shown}　{verdict}')
+    return probed
 
 
 def phase_direction(node, rep):
     """★ D-036 的方向性：**同一个方向扇区里的东西，只有朝它走时才该拦**。"""
     print('【1】先问四个方向 ±30°、1 m 内最近回波（用的就是守卫那个原语）')
-    probed = []
-    for name, center, move in DIRECTIONS:
-        r, a = probe_direction(node, center)
-        probed.append((name, center, move, r, a))
-        shown = '（无回波）' if r is None or r < 0 else f'{r:.3f} m'
-        print(f'    {name}（中心 {center * 57.29578:+.0f}°）：最近回波 {shown}')
+    probed = probe_four_directions(node)
     if probed[0][3] is None:
         rep('问到 LiDAR 原语', False, 'sector_min_range 不可用 —— liDAR Driver 在跑吗？')
         return
     rep('问到 LiDAR 原语', True, f'{len(probed)} 个方向')
 
-    clear = [p for p in probed if p[3] is not None and p[3] > CLEAR_MARGIN]
-    blocked = [p for p in probed if p[3] is not None and 0 < p[3] <= CLEAR_MARGIN]
+    clear, blocked = classify_directions(probed)
     if not clear:
         print()
         print(f'  ⛔ **四个方向都不通畅**（判据：最近回波要 > {CLEAR_MARGIN} m）—— 拒测。')
@@ -402,6 +454,21 @@ def phase_direction(node, rep):
         rep('存在一个通畅方向供测试', False, '四个方向都被挡')
         return
     rep('存在一个通畅方向', True, f'{clear[0][0]}（最近回波 {clear[0][3]:.3f} m）')
+
+    if not blocked:
+        # ⚠️ 这一条**必须拒测**，不能"跳过对照继续跑"：本相位的全部意义就是
+        #    "放行 vs 拦下"这个**对照**。只验放行，等于把"守卫是不是一刀切"放过去了 ——
+        #    那正是 D-036 要防的东西（一个什么都拦的守卫会被关掉，等于没有）。
+        print()
+        print(f'  ⛔ **没有任何一个方向是"受阻"的**（判据：最近回波 ≤ '
+              f'{GUARD_STOP_RANGE:.3f} m = 守卫的真实阈值）—— 拒测。')
+        print('     这一段的核心是**对照**：通畅方向必须放行、受阻方向必须拦下。')
+        print(f'     请在一个方向上放个东西（约 ≤ {GUARD_STOP_RANGE:.2f} m，'
+              f'比 {GUARD_STOP_RANGE:.2f} m 更近才拦得住），')
+        print(f'     同时留另一个方向 > {CLEAR_MARGIN} m 是空的。')
+        rep('存在一个受阻方向供对照', False, '四个方向都通畅')
+        return
+    rep('存在一个受阻方向', True, f'{blocked[0][0]}（最近回波 {blocked[0][3]:.3f} m）')
 
     name, center, move, r, a = clear[0]
     print(f'\n【2】★ 往**通畅的「{name}」**方向走 0.3 m —— 守卫**不该**拦它')
@@ -419,10 +486,6 @@ def phase_direction(node, rep):
     rep(f'★ 守卫**没有**拦「{name}」方向的运动', not latched, f'safety status[0]={node.sstat(0)}')
     rep(f'★ 而且轮子真的朝「{name}」转了', rmax > 0.1, f'窗口内最大 |rps| {rmax:.4f}')
     node.spin_for(1.0)
-
-    if not blocked:
-        print('\n（本次没有"受阻方向"，跳过对照 —— 但【1】已经证明守卫看得到方向上的差异）')
-        return
 
     bname, bcenter, bmove, br, ba = blocked[0]
     print(f'\n【3】★ 对照组：往**受阻的「{bname}」**方向走（那里 {br:.3f} m 有东西）—— 守卫**该**拦')
@@ -452,6 +515,9 @@ def phase_direction(node, rep):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--phase', choices=['veto', 'guard', 'direction'], required=True)
+    ap.add_argument('--dry-classify', action='store_true',
+                    help='只量摆位并分类就退出 —— 不发任何运动指令。'
+                         '不需要 Motor Driver，也不需要人看护（要车已摆好、LiDAR Driver 在跑）')
     args = ap.parse_args()
 
     rclpy.init()
@@ -461,6 +527,47 @@ def main():
     def rep(name, passed, detail):
         results.append((name, passed, detail))
         print(f'  {"✅" if passed else "❌"} {name}：{detail}')
+
+    if args.dry_classify:
+        # 摆位检查：**只读 LiDAR 原语**。刻意放在 preflight 之前 ——
+        # 它既不需要底盘在线，也不该为了量一次距离就去动 `~/resume`。
+        try:
+            print()
+            print('=' * 74)
+            print('  摆位检查（不驱动任何东西 —— 只问 LiDAR 原语四个方向各有多远）')
+            print('=' * 74)
+            print()
+            probed = probe_four_directions(node)
+            if probed[0][3] is None:
+                print()
+                print('  ⛔ sector_min_range 不可用 —— LiDAR Driver 在跑吗？')
+                return 3
+            clear, blocked = classify_directions(probed)
+            print()
+            print(f'  通畅（> {CLEAR_MARGIN} m 或无回波）：'
+                  + ('、'.join(p[0] for p in clear) or '（无）'))
+            print(f'  受阻（≤ {GUARD_STOP_RANGE:.3f} m）：'
+                  + ('、'.join(p[0] for p in blocked) or '（无）'))
+            print()
+            if not clear:
+                print('  ⛔ 摆位不满足：**没有一个通畅方向** → `--phase direction` 会拒测。')
+                print(f'     请在某个方向留出 > {CLEAR_MARGIN} m 的空档。')
+                return 1
+            if not blocked:
+                print('  ⛔ 摆位不满足：**没有一个受阻方向** → `--phase direction` 会拒测。')
+                print(f'     请在一个方向放个东西（≤ {GUARD_STOP_RANGE:.2f} m，'
+                      f'比 {GUARD_STOP_RANGE:.2f} m 更近才拦得住），')
+                print(f'     同时留另一个方向 > {CLEAR_MARGIN} m 是空的。')
+                return 1
+            print(f'  ✅ 摆位满足：往「{clear[0][0]}」（{clear[0][3] if clear[0][3] > 0 else "无回波"}）'
+                  f'走须放行、往「{blocked[0][0]}」（{blocked[0][3]:.3f} m）走须拦下。')
+            print('     下一步：起全套节点（四轮离地、人在场），跑 `--phase direction`。')
+            print()
+            return 0
+        finally:
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
 
     try:
         print()
