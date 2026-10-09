@@ -63,7 +63,8 @@ from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 
 from embodied_skills_interfaces.msg import SkillEvent
-from embodied_skills_interfaces.srv import AgentTask, SkillCancel, SkillInvoke
+from embodied_skills_interfaces.srv import (AgentTask, SkillCancel, SkillInvoke,
+                                             SkillResult)
 
 from embodied_agent_runtime import execution, llm_client, llm_planner, planner, replan
 from embodied_agent_runtime.memory import AgentMemory
@@ -89,6 +90,7 @@ class AgentRuntime(Node):
 
         self.declare_parameter('gateway_service', '/skill_gateway/invoke')
         self.declare_parameter('gateway_cancel_service', '/skill_gateway/cancel')
+        self.declare_parameter('gateway_result_service', '/skill_gateway/get_result')
         self.declare_parameter('event_topic', '/embodied/skill/events')
         self.declare_parameter('status_topic', '/embodied/agent/status')
         self.declare_parameter('registry_file', '')
@@ -163,6 +165,9 @@ class AgentRuntime(Node):
             SkillInvoke, g('gateway_service'), callback_group=self._srv_group)
         self._cancel_cli = self.create_client(
             SkillCancel, g('gateway_cancel_service'), callback_group=self._srv_group)
+        #: 取**上一步的结果** —— 参数绑定（D-048）要靠它。只读，不改变任何状态。
+        self._result_cli = self.create_client(
+            SkillResult, g('gateway_result_service'), callback_group=self._srv_group)
 
         self.create_service(AgentTask, '~/submit', self.on_submit,
                             callback_group=self._srv_group)
@@ -369,16 +374,21 @@ class AgentRuntime(Node):
         """计划在人看的地方长什么样：`A → B → C`。单步就是 `A`。"""
         return ' → '.join(s.skill for s in steps)
 
-    def _dispatch_step(self, step, request_id):
+    def _dispatch_step(self, step, request_id, prev_task_id=None):
         """把**一步**交给网关。返回 `(reply, 失败原因)`；失败时 reply 为 None。
 
         ⚠️ 每一步都走**同一个** `~/invoke` —— 多步没有旁路，
         第 2 步的六项检查与第 1 步一模一样。
         """
+        args, why = self._resolve_args(step, prev_task_id)
+        if args is None:
+            # ★ 绑定解不出来 ⇒ **不派发**（不是"拿个默认值凑合"）。理由见 _resolve_args。
+            return None, why
+
         invoke = SkillInvoke.Request()
         invoke.principal = 'agent.planner'
         invoke.skill = step.skill
-        invoke.args_json = json.dumps(step.args, ensure_ascii=False)
+        invoke.args_json = json.dumps(args, ensure_ascii=False)
         invoke.request_id = request_id
 
         wait = float(self.get_parameter('service_wait_timeout').value)
@@ -392,6 +402,61 @@ class AgentRuntime(Node):
         if not future.done():
             return None, f'网关受理超时（{step.skill}）'
         return future.result(), ''
+
+    def _resolve_args(self, step, prev_task_id):
+        """把这一步参数里的**绑定**换成上一步结果里的真值。返回 `(args, 错误)`。
+
+        ⚠️ 解不出来就**不派发** —— 绝不"拿个默认值凑合"。绑定的意思是
+        "这一步要用上一步的**那个**读数"，凑合一个值等于**假装看过世界**。
+        （与"不知道 ≠ 安全"同一条：解不出来是"不知道"，不是"随便来一个"。）
+
+        ⚠️ 解出来的值**照样过网关**（`~/invoke` 只收到普通字面量）——
+        绑定**不是**绕过准入的路子，它只是"值的来源不同"。
+        """
+        args = step.args or {}
+        bindings = {k: v for k, v in args.items() if planner.is_binding(v)}
+        if not bindings:
+            return args, ''
+        if not prev_task_id:
+            return None, (f'{step.skill} 的参数里有绑定，但没有"上一步"可接'
+                          f'（规划期本应拒掉这条计划）')
+        prev = self._fetch_result(prev_task_id)
+        if prev is None:
+            return None, f'取不到上一步（{prev_task_id}）的结果 —— 绑定无从解析'
+        out = dict(args)
+        for name, binding in bindings.items():
+            value, why = planner.resolve_binding(binding, prev)
+            if why:
+                return None, f'参数 {name} 的绑定解不出来：{why}'
+            out[name] = value
+        return out, ''
+
+    def _fetch_result(self, task_id):
+        """问网关要一个任务的 `result_json`（解成对象）。取不到返回 None。"""
+        wait = float(self.get_parameter('service_wait_timeout').value)
+        if not self._result_cli.wait_for_service(timeout_sec=wait):
+            self.get_logger().warn('网关的 get_result 不可用 —— 带绑定的参数解不出来')
+            return None
+        req = SkillResult.Request()
+        req.task_id = task_id
+        fut = self._result_cli.call_async(req)
+        deadline = time.monotonic() + wait
+        while not fut.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not fut.done():
+            return None
+        try:
+            res = fut.result()
+        except Exception as exc:                       # noqa: BLE001
+            self.get_logger().error(f'取结果异常：{exc!r}')
+            return None
+        if res is None or not res.finished:
+            return None
+        try:
+            obj = json.loads(res.result_json or '{}')
+        except ValueError:
+            return None
+        return obj if isinstance(obj, dict) else None
 
     # ---------- 事件 ----------
 
@@ -565,8 +630,12 @@ class AgentRuntime(Node):
             self.get_logger().error(f'计划 {plan_id} 没有第 {step_index} 步')
             return
         step = rec.steps[idx]
+        # ★ 上一步的**网关任务号** —— 参数绑定要从它的结果里取值（D-048）。
+        #   ⚠️ 第 1 步没有"上一步"，而规划期已经拒掉了第 1 步带绑定的计划。
+        prev_task_id = rec.step_task_ids[idx - 1] if idx > 0 else None
         # 标签带上第几次尝试 —— 否则两次尝试的第 2 步都叫 `p-s2`，日志里分不清
-        reply, why = self._dispatch_step(step, f'{plan_id}-a{attempt_no}-s{step_index}')
+        reply, why = self._dispatch_step(step, f'{plan_id}-a{attempt_no}-s{step_index}',
+                                         prev_task_id=prev_task_id)
         if reply is None or not reply.accepted:
             # ⚠️ 后续步骤派不出去 ⇒ **整条计划到此为止**。这里**不重规划**：
             #    派不出去是通路故障（网关不可用 / 被拒），不是"这条路走不通"——

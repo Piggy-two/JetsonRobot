@@ -124,10 +124,19 @@ def decide(*, model_ready, label_known, frame_age_s, frame_max_age_s,
 
     # ---- 到这里是"一帧都没看到"：够不够格说"没有"？ ----
     if window.frames < min_frames:
+        # ⚠️ **顺带把画面质量也报出来**：2026-10-09 实测撞到过 ——
+        #    相机全黑（清晰度 0），而 GPU 被另一个模型抢着、我们只有 ~5.6 Hz，
+        #    于是**真因（画面不可用）被症状（帧太少）盖住了**，
+        #    排查的人会去查算力，而该看的是相机。
+        #    ⇒ 主因照旧是"帧太少"（不据此下结论），但**必须把那条线索一起给出来**。
+        hint = ''
+        if window.quality_min >= 0 and window.quality_min < quality_min:
+            hint = (f'（顺带：这几帧的清晰度最低 {window.quality_min:.0f}，'
+                    f'低于 {quality_min:g} —— 画面本身可能也不可用，先看相机）')
         return Decision(
             False, False,
             f'最近只拿到 {window.frames} 帧（要 ≥ {min_frames} 帧才够确认"没有"）'
-            f'—— 不知道，不是"没有"')
+            f'—— 不知道，不是"没有"{hint}')
 
     if window.best_below is not None:
         # ★ 看到了、但不够调用方要的那个分 —— **必须说出来**，

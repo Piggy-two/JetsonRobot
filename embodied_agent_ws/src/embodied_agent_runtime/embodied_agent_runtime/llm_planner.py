@@ -88,6 +88,25 @@ SYSTEM_PROMPT = """你是这台机器人的**任务规划模块**。
     **不加条件就等于"无论有没有人都往前走"** —— 那不是用户要的。
 - 做不到 → **如实拒绝**并说明缺什么能力。宁可说"做不到"，也不要硬凑。
 
+- 参数**可以接上一步的结果**（可选）：`{"from": "prev", "field": "<字段>", "as": "<变换>"}`
+  —— 意思是「这个参数取上一步结果里的那个字段」。
+  `as` 三种：`value`（原样，默认）/ `sign`（取符号，±1）/ `opposite_sign`（符号取反，∓1）。
+  ⚠️ **第 1 步不能有绑定**（它前面没有上一步）。
+  ⚠️ **符号必须看清两边的约定**（写错不会报错、车照走，只是方向反了）：
+    `semantic.look_for` 的 `side` 是**画面里的左右**（左 = 负），
+    而 `turn_until_clear` 的 `direction` 是 **+1 = 逆时针 = 左转**。
+    ⇒「朝着看到的那一边转」要写 **`opposite_sign`**；写 `sign` 会**转向相反的一侧**。
+  ⚠️ 字段名要写**上一技能结果里真有的**（`look_for` 给的是
+    `success/state/message/elapsed/score/side/image_quality`）；写错会被拒并列出实际字段。
+
+例（条件 + 绑定一起用）：「看看人在哪边，看到就往那边转」：
+  {"steps": [
+    {"skill": "semantic.look_for", "args": {"label": "person", "min_score": 0.3}},
+    {"skill": "autonomous.turn_until_clear",
+     "args": {"max_angle": 1.57, "clear_range": 0.5, "step_angle": 0.5,
+              "direction": {"from": "prev", "field": "side", "as": "opposite_sign"}},
+     "when": {"prev": "TARGET_FOUND"}}]}
+
 只输出**一个 JSON 对象**，不要解释、不要 Markdown 代码块：
   计划：{"steps": [{"skill": "<技能名>", "args": {<参数名>: <数值>}},
                   {"skill": "<技能名>", "args": {...}, "when": {"prev": "<终态>"}}]}

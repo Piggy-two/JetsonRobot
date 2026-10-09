@@ -47,3 +47,25 @@ rules:
   #    其余终态（ARRIVED / BLOCKED / TARGET_FOUND / TARGET_LOST）⇒ **继续下一步**。
   #    `BLOCKED` 必须继续 —— 脱困计划成立的前提就是它。
   # ⚠️ `skill:` 与 `steps:` **不许同时写**（那样"走几步"不明确，会被拒）。
+
+  # ---- 条件与绑定（D-047 / D-048）------------------------------------------
+  # 「看到就往那边转」：第 1 步看一眼，第 2 步**只在看到时**才跑，
+  # 而且**转向哪个方向**由第 1 步给出的 `side` 决定 —— 这就是"参数绑定"。
+  #
+  # ⚠️ `opposite_sign` **不是笔误**：`side` 是**画面里的左右**（左 = 负），
+  #    而 `direction` 是 **+1 = 逆时针 = 左转** ⇒ 朝着目标转要用"符号取反"。
+  #    写 `sign` 会**转向相反的一侧**，而且**看起来一切正常**（车照转、日志全绿）。
+  # ⚠️ 第 1 步**不许**带绑定/条件：它前面没有上一步，没有东西可接、也无从判定。
+  # ⚠️ 绑定的值在**规划期还不知道**（要等上一步跑完），所以规划期只验形状；
+  #    真值在派发时替换，并**照常过网关**（绑定不是绕过准入的路子）。
+  看到就往那边转:
+    steps:
+      - skill: semantic.look_for
+        args: {label: person, min_score: 0.3}
+      - skill: autonomous.turn_until_clear
+        args:
+          max_angle: 1.57
+          clear_range: 0.5
+          step_angle: 0.5
+          direction: {from: prev, field: side, as: opposite_sign}
+        when: {prev: TARGET_FOUND}

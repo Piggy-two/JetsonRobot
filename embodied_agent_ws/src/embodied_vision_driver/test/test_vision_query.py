@@ -231,3 +231,22 @@ def test_a_qualifying_sighting_wins_over_a_sub_threshold_one():
              window=window(best=Det('person', 0.85), best_below=None))
     assert (d.valid, d.found) == (True, True)
     assert '看到了 person' in d.detail
+
+
+def test_too_few_frames_also_reports_a_blind_camera():
+    """★ 主因是"帧太少"，但**画面本身不可用**这条线索必须一起给出来。
+
+    2026-10-09 实测撞到过：相机全黑（清晰度 0）**加上** GPU 被另一个模型抢着
+    （我们只有 ~5.6 Hz）⇒ 真因（画面不可用）被症状（帧太少）盖住，
+    排查的人会去查算力，而该看的是相机。
+    """
+    d = call(window=window(best=None, frames=2, quality_min=0.0),
+             min_frames=3, quality_min=100.0)
+    assert d.valid is False
+    assert '帧' in d.detail and '清晰度' in d.detail and '先看相机' in d.detail
+
+
+def test_few_frames_with_a_fine_picture_does_not_add_the_hint():
+    """反向对照：画面是好的、只是帧少 —— 别乱加"先看相机"这种误导。"""
+    d = call(window=window(best=None, frames=2, quality_min=800.0), min_frames=3)
+    assert '先看相机' not in d.detail

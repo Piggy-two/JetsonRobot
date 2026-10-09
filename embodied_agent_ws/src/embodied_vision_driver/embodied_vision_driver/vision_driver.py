@@ -98,7 +98,14 @@ class VisionDriver(Node):
         #: ★ 判定用的**窗口**（秒）。否定结论必须基于一段窗口，不能基于一帧 ——
         #:   实测（2026-10-09）：**同一幅静止画面**里 `suitcase` 只出现在 **68%** 的帧，
         #:   拿一帧的"没找到"当结论 ⇒ 东西明明在眼前却**三次里有一次说"没有"**。
-        self.declare_parameter('confirm_window', 0.5)
+        #: ⚠️ **按真实推理帧率定，不是按标称帧率定**：2026-10-09 实测 ——
+        #:   厂商那个 yolo 也在抢 GPU 时，我们单次推理均值 **179 ms**（最快 17 ms，
+        #:   抖动极大）⇒ 只有 **~5.6 Hz**；0.5 s 的窗口里就只剩 ~2.8 帧，
+        #:   而 `min_frames=3` ⇒ **否定的判定会时不时变成"不知道"**。
+        #:   （那是**正确**的行为，但会让技能时灵时不灵。）⇒ 窗口放到 1.0 s。
+        #:   ⚠️ 这个 engine 是**固定形状 640×640** 的，`imgsz` 调小会直接报错 ——
+        #:   想靠降分辨率提速，得重新导出模型。
+        self.declare_parameter('confirm_window', 1.0)
         #: 窗口里至少要有几帧才够确认"没有"。太少 ⇒ 不知道（不是"没有"）。
         self.declare_parameter('min_frames', 3)
         self.declare_parameter('detections_topic', '/embodied/vision/detections')

@@ -57,6 +57,21 @@ Step = namedtuple('Step', 'skill args when', defaults=(None,))
 #: ⚠️ 第 1 步**不许**带条件 —— 它前面没有东西，条件无从判定（在 `accept_plan` 里拒）。
 WHEN_KEY = 'prev'
 
+#: 参数**绑定**：把"上一步结果里的某个字段"接到这一步的某个参数上。
+#: 写法：`"参数名": {"from": "prev", "field": "side", "as": "opposite_sign"}`
+#:
+#: ⚠️ **为什么 `as` 要显式写**（而不是偷偷替人算）：这里有一个真实的符号陷阱 ——
+#:   `semantic.look_for` 给的 `side` 是**画面里的左右**（左 = 负），
+#:   而 `turn_until_clear` 的 `direction` 是 **+1 = 逆时针 = 左转**。
+#:   所以"朝着看到的那一边转"要的是 **`opposite_sign`**；
+#:   直接写 `sign` 会**转向相反的一侧**，而且**看起来完全正常**（车照转、日志全绿）。
+#:   ⇒ 变换必须**写在纸面上**，不能藏在实现里 —— 写错了至少能被人一眼看见。
+#:   （画面左右与机体左右一致，这件事由 D-023 的相机朝向实机校验背书：
+#:     把物体放在车前方偏右，运动质心 513 次全在画面**右**侧、0 次在左。）
+BINDING_FROM = 'prev'
+#: 支持的变换。`value` = 原样传（比如把上一步的 `travelled` 当这一步的 `max_distance`）。
+BINDING_OPS = ('value', 'sign', 'opposite_sign')
+
 # 规划结果：是否接受、**步骤列表**、以及拒绝原因（人要看到的就是这句）。
 # ⚠️ 失败时 `steps` 为空 —— 部分计划没有意义（见 `accept_plan`）。
 PlanResult = namedtuple('PlanResult', 'accepted steps reason')
@@ -118,6 +133,82 @@ def accept_skill(skill, args, registry, source):
         return PlanResult(False, [], f'{source}给的参数不被接受：{why}')
 
     return PlanResult(True, [Step(skill, args)], '')
+
+
+def is_binding(value):
+    """这个参数值是不是一个**绑定**（而不是一个普通字面量）。"""
+    return isinstance(value, dict) and 'from' in value
+
+
+def check_binding(raw, index, source):
+    """校验一个参数绑定的**形状**。返回错误说明（`''` = 合法）。
+
+    ⚠️ 这里**只验形状，不验取值** —— 值要等上一步跑完才知道。
+    取值那道关在**派发时**由网关照常把守（绑定**不绕过**准入）。
+    """
+    if raw.get('from') != BINDING_FROM:
+        return (f'{source}第 {index} 步的绑定只支持 from: {BINDING_FROM!r}'
+                f'（"上一步"）—— 得到 {raw.get("from")!r}。'
+                f'指向更早的步骤会让"第几步"变成一个要人肉追的算术题')
+    field = raw.get('field')
+    if not isinstance(field, str) or not field.strip():
+        return f'{source}第 {index} 步的绑定缺 field（要接上一步结果里的哪个字段）'
+    op = raw.get('as', 'value')
+    if op not in BINDING_OPS:
+        return (f'{source}第 {index} 步的绑定 as 不认识：{op!r}（支持 {list(BINDING_OPS)}）')
+    extra = sorted(k for k in raw if k not in ('from', 'field', 'as'))
+    if extra:
+        return (f'{source}第 {index} 步的绑定里有不认识的键 {extra} —— '
+                f'不认识的键必须报错，不能当没写')
+    return ''
+
+
+def resolve_binding(binding, prev_result):
+    """把绑定解成一个具体值。返回 `(值, 错误说明)`。
+
+    :param prev_result: 上一步技能的 `result_json` 解出来的对象（dict）
+    """
+    if not isinstance(prev_result, dict):
+        return None, f'上一步没有给出可用的结果（得到 {type(prev_result).__name__}）'
+    field = binding['field']
+    if field not in prev_result:
+        # ★ 把**它实际给了什么**列出来 —— 与"类别不在表里"同一条纪律：
+        #   只说"没有这个字段"，排查的人得自己去翻技能定义
+        return None, (f'上一步的结果里没有 {field!r} —— 它给的是 '
+                      f'{sorted(prev_result)}')
+    raw = prev_result[field]
+    op = binding.get('as', 'value')
+    if op == 'value':
+        return raw, ''
+    try:
+        num = float(raw)
+    except (TypeError, ValueError):
+        return None, (f'上一步的 {field} 不是数（{raw!r}），'
+                      f'而 as={op!r} 要对它取符号 —— 不做猜测')
+    if op == 'sign':
+        return (1.0 if num > 0 else (-1.0 if num < 0 else 0.0)), ''
+    return (-1.0 if num > 0 else (1.0 if num < 0 else 0.0)), ''      # opposite_sign
+
+
+def _placeholder_for(spec, name):
+    """给**绑定的**参数填一个占位值，好让规划期把"名字对不对、必填项齐不齐"验掉。
+
+    ⚠️ 它**只用来过形状检查**：绑定的真实值要等上一步跑完才知道，
+    所以取值校验**推迟到派发时**，由网关照常做 —— 绑定**不绕过**准入。
+    """
+    p = spec.param(name)
+    if p is None:
+        return None
+    if p.type in ('float', 'int'):
+        lo, hi = p.minimum, p.maximum
+        if lo is not None and lo > 0:
+            return lo
+        if hi is not None and hi < 0:
+            return hi
+        return 0.0 if p.type == 'float' else 0
+    if p.type == 'bool':
+        return False
+    return 'x'
 
 
 def when_ok(step, prev_state):
@@ -182,7 +273,34 @@ def accept_plan(steps, registry, source):
     for i, raw in enumerate(steps, 1):
         if not isinstance(raw, dict):
             return PlanResult(False, [], f'{source}第 {i} 步不是一条技能条目：{raw!r}')
-        r = accept_skill(raw.get('skill'), raw.get('args'), registry, f'{source}第 {i} 步')
+        args = raw.get('args')
+        bound = {}
+        if isinstance(args, dict):
+            for k, v in args.items():
+                if not is_binding(v):
+                    continue
+                why = check_binding(v, i, source)
+                if why:
+                    return PlanResult(False, [], f'{why}　⟹　整条计划被拒（不做半条）')
+                if i == 1:
+                    return PlanResult(False, [], (
+                        f'{source}第 1 步不能有参数绑定 —— 它前面没有上一步，'
+                        f'没有东西可接（要"先做点什么再看"就把它放第 1 步）'
+                        f'　⟹　整条计划被拒（不做半条）'))
+                bound[k] = v
+        if bound:
+            # 占位值只为了让下面的参数校验跑得过（名字/必填/类型形状）；
+            # 真值在派发时替换，并由**网关**照常校验。
+            spec = registry.get(raw.get('skill'))
+            args = dict(args)
+            for k, v in bound.items():
+                ph = _placeholder_for(spec, k) if spec is not None else None
+                if ph is None:
+                    return PlanResult(False, [], (
+                        f'{source}第 {i} 步把绑定接到了不存在的参数 {k!r} 上'
+                        f'　⟹　整条计划被拒（不做半条）'))
+                args[k] = ph
+        r = accept_skill(raw.get('skill'), args, registry, f'{source}第 {i} 步')
         if not r.accepted:
             # 把"是第几步"带上 —— 否则模型/规则表写错时看不出错在哪一步
             return PlanResult(False, [], f'{r.reason}　⟹　整条计划被拒（不做半条）')
@@ -190,7 +308,9 @@ def accept_plan(steps, registry, source):
         if why:
             return PlanResult(False, [], f'{why}　⟹　整条计划被拒（不做半条）')
         st = r.steps[0]
-        out.append(Step(st.skill, st.args, when))
+        real = dict(st.args)
+        real.update(bound)          # 把占位值换回**绑定本身**
+        out.append(Step(st.skill, real, when))
     return PlanResult(True, out, '')
 
 
