@@ -264,6 +264,24 @@ Safety > Control > Skill > Agent
 > 这也是避障停车选择**锁存**而不是"自动解除"的原因（D-036 决策 1）。
 > ⚠️ 该交互**尚未实测** —— D-027 的验收刻意在 Motor Driver 不跑时进行。
 
+> 🔴 **厂商底盘有**三条** Twist 入口，而上面整套防线只覆盖其中一条**（2026-10-09，D-050）：
+> 三条全部汇进 `odom_publisher` 的**同一个没有闸门的回调**
+> （`ros2_ws/src/driver/controller/controller/odom_publisher_node.py`，行 136 / 137 / 138）：
+>
+> | 入口 | 限幅 | 谁在用 |
+> |---|---|---|
+> | `/cmd_vel` | ✅ ±0.2 m/s、±0.5 rad/s | **本项目**（Motor Driver 的指令流 + Safety 的零速流） |
+> | **`/controller/cmd_vel`** | ❌ **无**（直连回调，不经过限幅函数） | **厂商整个 app 生态** |
+> | `/app/cmd_vel` | ✅ | 厂商手机 app 那一侧 |
+>
+> ⇒ **`/controller/cmd_vel` 上的任何速度都不受本项目任何一道约束** ——
+> Safety 的"独立零速通道"只发 `/cmd_vel`，**对它无效**。
+> 2026-10-09 实测：厂商的 `self_driving` / `line_following` / `object_tracking` /
+> `joystick_control` / `lidar_app` 五个 app **当时都挂着**（但**没在发**：8 秒里一条都没有）。
+> ⇒ **"车能停住"的前提要写全**：**在本项目是唯一发指令的人的前提下**成立。
+> 运动验收前的前置检查：`python3 tools/vendor_cmd_channel_check.py`。
+> ⚠️ 这条路的存在是**结构性的**（厂商代码里写死），本项目**改不了它**，只能**看得见它**。
+
 > ⚠️ **实测约束（2026-10-05，D-020）**：上面这一整套 **Watchdog / Command Timeout / Motor Timeout 全部要由本项目自己实现** —— 厂商底盘**没有任何指令超时保护**：停止发布后电机会保持最后一条速度指令继续转，实测 IMU 振荡幅度 ±0.067 rad/s（对比发 0 时 ±0.0015）。
 >
 > 因此 **Motor Stop 的动作定义为「主动、持续向 `/cmd_vel` 发布零速度」**，而不是「停止发指令」；且 Safety Runtime 必须拥有**独立于 Control Skill 的发布通道**，否则上游一旦卡死，停车指令也发不出去。
