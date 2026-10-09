@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_vision_driver</name>
+  <version>0.1.0</version>
+  <description>
+    Vision Driver：把"画面里有没有某个东西、在哪一侧"变成一句**可回答的话**。
+    🔒 判定在纯 Python 的 vision_query.py 里，那条规则是**不对称**的：
+    找到了可信；"没找到"只有在画面质量达标时才敢说；糊/没帧/模型没就绪/类别不在表里
+    ⇒ 一律「不知道」，而不是「没有」。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>embodied_skills_interfaces</depend>
+  <exec_depend>cv_bridge</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

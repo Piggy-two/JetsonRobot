@@ -22,7 +22,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/AgentTask.srv"
   "srv/AdvanceUntilBlocked.srv"
   "srv/TurnUntilClear.srv"
+  "srv/FindInView.srv"
   "msg/SkillEvent.msg"
+  "msg/VisionDetection.msg"
+  "msg/VisionDetections.msg"
   DEPENDENCIES builtin_interfaces
 )
 

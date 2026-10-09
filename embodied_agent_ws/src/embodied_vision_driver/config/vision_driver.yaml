@@ -1,0 +1,34 @@
+vision_driver:
+  ros__parameters:
+
+    # ---- 输入 ----
+    # 默认吃**厂商相机**的原始话题（厂商栈在跑它就在）。
+    # ⚠️ 也可以指向我们自己的 `embodied_camera_driver` 输出 `/embodied/camera/image`；
+    #    视觉**不依赖**那个 Driver 的时间戳收口（#23）—— 因为本节点**自己打时间戳**
+    #    （见 vision_driver.py 里 _publish 的说明：厂商图像戳陈旧且陈旧量不是常数）。
+    image_topic: '/depth_cam/rgb0/image_raw'
+
+    # ---- 模型 ----
+    # ⚠️ **从厂商 SDK 借一个通用模型，不改厂商任何文件**（§0.2 的 Overlay 规则）。
+    #    厂商默认加载的是 6 类交通标志那个（`best_traffic_26`），
+    #    而同一个目录里的 `yolo26n` 是 **80 类通用 COCO** —— 2026-10-09 实测可用。
+    model_dir: '/home/ubuntu/ros2_ws/src/example/example/yolo_detect/models/26'
+    model_file: 'yolo26n.engine'
+
+    # 发到**话题**上的门槛。⚠️ 服务那条路上门槛由**调用方**给：
+    # "多少分算数"是策略问题 —— 实测 nano 模型在杂物场景常给 0.2~0.4。
+    confidence: 0.25
+
+    # ---- 画面质量 ----
+    # 中心取样区占整幅的比例。广角镜头的边缘本来就软，取满会把判定带歪。
+    quality_roi: 0.5
+    # 清晰度门槛（中心区 Laplacian 方差）。**按本机实测标定**（2026-10-09）：
+    # 失焦时 ≈ 40、调好焦后 ≈ 3050。取 100 是保守的**下限**（用来判"糊"），不是"好"的标准。
+    quality_min: 100.0
+    # 最近一帧的最大年龄（秒）。超过它 ⇒ 图像陈旧 ⇒ 一律「不知道」：
+    # 画面停住时"没找到"算不了数，那是没在看的安静，不是没东西。
+    frame_max_age: 0.5
+
+    # ---- 输出 ----
+    detections_topic: '/embodied/vision/detections'
+    diag_topic: '/embodied/vision/diag'
