@@ -21,8 +21,20 @@
 | Executor（WAIT 推进 / 超时 / 唤醒判定） | ✅ 已实现，**纯逻辑 + 单测** |
 | Event Manager | ✅ 已实现（订阅事件，按 task_id 派发） |
 | Memory（有界历史） | ✅ 已实现 |
-| Planner | ⚠️ **stub**：按一张规则表查表，查不到就明确拒绝 |
-| LLM 规划 / 重规划 | ❌ Phase 7 |
+| Planner | ✅ 规则表（离线、确定）→ Local/Cloud LLM 两跳（D-038） |
+| Replan | ✅ 已实现（D-044）：终态**值得**再试时换一条走法，有界且必须不同 |
+
+**重规划**（D-044）
+------------------
+一条计划以 `BLOCKED` / `TARGET_LOST` 收尾时，Agent **不再就此停手**，而是拿
+**当初那句话**再问一次规划器，换一条走法再试。这是 `plan.md` §18 那个闭环
+（计划 → 执行 → 观察 → 重规划）里最后缺的一块。
+
+⚠️ 有两条**结构性**保证，都不依赖模型自觉：
+  * **必须不同**：新计划若与试过的任何一次相同 ⇒ 拒绝（`replan.check_new_plan`）。
+    同一条计划只会以同样的方式再失败一次 —— 放过去就是无限循环，还不报错。
+  * **有界**：`max_replans` 兜住"每次都不同、却一路走远"的情况。
+  * 外加：新计划**重新过一遍** `allow_motion` 闸门 —— 重规划不是绕过闸门的路。
 
 ⚠️ **规则表默认是空的** ⇒ 任何自然语言任务都会被明确拒绝
 （「需要 LLM 规划，当前未实现（Phase 7）」）。**这是刻意的**，不是缺陷。
@@ -53,7 +65,7 @@ from std_msgs.msg import Float64MultiArray
 from embodied_skills_interfaces.msg import SkillEvent
 from embodied_skills_interfaces.srv import AgentTask, SkillCancel, SkillInvoke
 
-from embodied_agent_runtime import execution, llm_client, llm_planner, planner
+from embodied_agent_runtime import execution, llm_client, llm_planner, planner, replan
 from embodied_agent_runtime.memory import AgentMemory
 
 # 网关的注册表是"有哪些技能"的唯一事实来源 —— 本节点直接读**同一份数据**，
@@ -85,6 +97,11 @@ class AgentRuntime(Node):
         self.declare_parameter('sweep_rate', 5.0)
         # ⚠️ 三层闸门的第一层（D-033）。默认 false —— 本节点能间接让车动。
         self.declare_parameter('allow_motion', False)
+        # 重规划**预算**（D-044）。0 = 彻底关掉（计划失败就此收手）。
+        # 默认 2：值得再试一两次，但不足以让它一路试下去。
+        # ⚠️ 每次重规划都要**重新过 allow_motion 闸门**，所以这个默认值
+        #    并不会让"没人看着"的车凭空多出一种行为 —— 运动本来就被那道闸门管着。
+        self.declare_parameter('max_replans', 2)
 
         # ---- 云端 LLM 规划（Phase 7 / D-038）----
         # ⚠️ **默认关闭**，而且是刻意的两条理由：
@@ -260,8 +277,7 @@ class AgentRuntime(Node):
 
         # 每一步都要过 `allow_motion` 闸门：**只要任何一步会引起运动**，
         # 整条计划都要显式放行才派发（闸门③，D-033）。
-        movers = [s.skill for s in result.steps
-                  if getattr(self.registry.get(s.skill), 'causes_motion', False)]
+        movers = self._movers(result.steps)
         if movers and not self.get_parameter('allow_motion').value:
             res.accepted = False
             res.message = (f'allow_motion=false —— 拒绝派发可能引起运动的技能 '
@@ -288,7 +304,8 @@ class AgentRuntime(Node):
 
         with self._lock:
             rec = self._executor.submit_plan(reply.task_id, result.steps,
-                                             'agent.planner', reply.timeout_s)
+                                             'agent.planner', reply.timeout_s,
+                                             text=req.text)
             if rec is not None:
                 # 把网关任务号绑到第 1 步上 —— 不绑就认不出它的事件（见 execution.py）
                 self._executor.bind_step(reply.task_id, 0, reply.task_id)
@@ -317,6 +334,15 @@ class AgentRuntime(Node):
         return res
 
     # ---------- 派发 ----------
+
+    def _movers(self, steps):
+        """这条计划里**会引起运动**的技能名。闸门③（D-033）的判据。
+
+        ⚠️ 只写一处：首次受理与重规划**必须**用同一个判据 ——
+        分成两份的那一刻，就有一份会先过期（然后重规划成了绕过闸门的路）。
+        """
+        return [s.skill for s in steps
+                if getattr(self.registry.get(s.skill), 'causes_motion', False)]
 
     @staticmethod
     def _plan_label(steps):
@@ -372,44 +398,155 @@ class AgentRuntime(Node):
             self._dispatch_next(outcome.plan_id, outcome.step_index)
             return
 
-        # ---- 到这里就是**计划级终态**：唤醒 Agent 一次 ----
-        rec = self._executor.get(outcome.plan_id)
-        plan = list(rec.steps) if rec is not None else []
-        self.memory.remember_wakeup(outcome.plan_id, msg.skill, msg.state, msg.detail,
-                                    now=time.monotonic())
+        # ---- 到这里就是**一次尝试的终态**：唤醒 Agent 一次，让它决定下一步 ----
+        self._settle_attempt(outcome.plan_id, msg.skill, msg.state, msg.detail,
+                             msg.verified, outcome.reason)
+
+    def _settle_attempt(self, plan_id, skill, state, detail, verified, reason):
+        """**尝试结束**之后 Agent 的这一轮：先记一笔，再决定"重规划还是收手"。
+
+        ⚠️ 这条路径**只有一个入口**（`on_event` 与 `sweep` 都走它）——
+        分两处写的话，必然有一处会漏掉重规划，或者漏掉 `finish()` 的收尾，
+        而后者会让记录永远漏在表里（既不超时、也不淘汰）。
+        """
+        with self._lock:
+            rec = self._executor.get(plan_id)
+            plan = list(rec.steps) if rec is not None else []
+        self.memory.remember_wakeup(plan_id, skill, state, detail, now=time.monotonic())
         self.get_logger().error(
-            f'★ 唤醒 Agent：{outcome.plan_id}｜{self._plan_label(plan) if plan else msg.skill}'
-            f'｜{msg.state}｜{outcome.reason or msg.detail}｜verified={msg.verified}')
-        self.get_logger().warn(
-            '⚠️ 本版**没有重规划**（Phase 7 才接 LLM）—— 到这里为止：'
-            'Agent 知道任务终止了、终止在什么状态')
-        if rec is not None and not msg.verified:
+            f'★ 唤醒 Agent：{plan_id}｜{self._plan_label(plan) if plan else skill}'
+            f'｜{state}｜{reason or detail}｜verified={verified}')
+        if not verified:
             self.get_logger().warn(
-                f'⚠️ {msg.state} 是**技能自报**的，未经独立反馈确认'
-                f'（verified=false）—— 不要把它读成"已经到位"')
+                f'⚠️ {state} 是**技能自报**的，未经独立反馈确认（verified=false）'
+                f'—— 不要把它读成"已经到位"')
+        self._maybe_replan(plan_id, state, detail)
+
+    # ---------- 重规划（D-044）----------
+
+    def _maybe_replan(self, plan_id, state, detail):
+        """终态之后：换一条走法再试，或者就此收手并**明确收尾**。
+
+        ⚠️ `state` **只**决定"值不值得试"（`replan.should_replan`）：
+        `ARRIVED` / `TARGET_FOUND` 是成功，`CANCELLED` 是用户叫停，
+        `FAILED` 是故障 —— 这三个都不该被自动重试（理由见 `replan.py`）。
+        """
+        with self._lock:
+            rec = self._executor.get(plan_id)
+            if rec is None:
+                self.get_logger().warn(
+                    f'{plan_id} 的终态到了，但记录已经不在表里（被淘汰？）—— 不再重规划')
+                return
+            max_replans = int(self.get_parameter('max_replans').value)
+            ok, why = replan.should_replan(state, rec.replans, max_replans)
+            text = rec.text
+            tried = [list(a) for a in rec.attempts]
+            tried_states = list(rec.attempt_states)
+
+        if not ok:
+            self._close_task(plan_id, state, why)
+            return
+        if not text:
+            # 没有原话就只能瞎猜 —— 那比不重规划糟得多（见 replan.REPLAN_NO_TEXT）
+            self._close_task(plan_id, state, replan.REPLAN_NO_TEXT)
+            return
+
+        self.get_logger().warn(f'↻ {why}：拿原话 + **试过的历史**再问一次规划器'
+                               f'（{text!r}｜已试 {len(tried)} 条）')
+
+        # 与**首次受理走完全同一条**两跳：规则表优先，没命中才问 LLM。
+        # ⚠️ 历史（`tried` / `tried_states`）**必须带上**：不带的话，
+        #    同一段文本问出的还是同一个计划，而 `check_new_plan` 会当场把它挡掉
+        #    —— 表现就是"重规划这个功能装了但永远什么也不做"。
+        #    带上历史，LLM 那一跳才知道"这些都没成，换个走法"（见 RETRY_PROMPT）。
+        plan = llm_planner.plan_task(text, self.rules, self.registry, self.llm,
+                                     guard=self._planning_lock,
+                                     tried=tried, states=tried_states)
+        result = plan.result
+        if not result.accepted:
+            self._close_task(plan_id, state,
+                             f'{replan.REPLAN_PLANNER_REFUSED}（{plan.source}）：{result.reason}')
+            return
+        self.get_logger().info(
+            f'↻ 重规划得到新计划：{self._plan_label(result.steps)}（来自 {plan.source}）')
+
+        with self._lock:
+            rec = self._executor.get(plan_id)
+            if rec is None:
+                return
+            movers = self._movers(result.steps)
+            # ⚠️ 三关一次过完，**全部**在派发之前 —— 尤其是"必须与试过的不一样"。
+            ok, why = replan.check_new_plan(
+                result.steps, rec, movers,
+                bool(self.get_parameter('allow_motion').value))
+            attempt_no = rec.attempt_no + 1
+        if not ok:
+            self._close_task(plan_id, state, why)
+            return
+
+        reply, dispatch_why = self._dispatch_step(
+            result.steps[0], f'{plan_id}-a{attempt_no}-s1')
+        if reply is None or not reply.accepted:
+            self._close_task(plan_id, state,
+                             f'重规划的首步派发失败：{dispatch_why or reply.message}')
+            return
+
+        with self._lock:
+            rec = self._executor.start_attempt(plan_id, result.steps, reply.timeout_s)
+            if rec is not None:
+                self._executor.bind_step(plan_id, 0, reply.task_id)
+        if rec is None:
+            # 记录在派发途中消失了（淘汰 / 已被收尾）—— 必须**去取消**，
+            # 否则会有一个任务在跑而没人跟踪它（与 on_submit 同一条纪律）。
+            self._request_cancel(reply.task_id, 'Agent 侧无法跟踪重规划')
+            self.get_logger().error(
+                f'重规划的首步已派出但记不上账（{reply.task_id}）—— 已请求取消')
+            return
+        rec.deadline = min(rec.deadline, time.monotonic() + reply.timeout_s + 5.0)
+        self.get_logger().warn(
+            f'↻ 第 {attempt_no} 次尝试已派发 {result.steps[0].skill}'
+            f'（{self._plan_label(result.steps)}）—— 回到 WAIT')
+
+    def _close_task(self, plan_id, state, why):
+        """不再重规划 ⇒ **任务**收尾。
+
+        ⚠️ 必须显式调用：`on_event` / `timeout` 只结束**尝试**，
+        记录会一直停在 `ended` 上等这个决定 —— 少了它那份记录既不超时、
+        也不会被淘汰，就永远漏在表里了。
+        """
+        with self._lock:
+            found = self._executor.finish(plan_id, state)
+        if found:
+            self.get_logger().error(f'■ 任务收尾 {plan_id}｜{state}｜{why}')
+        else:
+            self.get_logger().warn(f'任务 {plan_id} 已收尾过（{why}）')
 
     def _dispatch_next(self, plan_id, step_index):
         """派发计划里的下一 步（`step_index` 是**人看的序号**，1 起）。"""
-        rec = self._executor.get(plan_id)
-        if rec is None:
-            return
+        with self._lock:
+            rec = self._executor.get(plan_id)
+            if rec is None:
+                return
+            attempt_no = rec.attempt_no
         idx = step_index - 1
         if not (0 <= idx < rec.total):
             self.get_logger().error(f'计划 {plan_id} 没有第 {step_index} 步')
             return
         step = rec.steps[idx]
-        reply, why = self._dispatch_step(step, f'{plan_id}-s{step_index}')
+        # 标签带上第几次尝试 —— 否则两次尝试的第 2 步都叫 `p-s2`，日志里分不清
+        reply, why = self._dispatch_step(step, f'{plan_id}-a{attempt_no}-s{step_index}')
         if reply is None or not reply.accepted:
-            # ⚠️ 后续步骤派不出去 ⇒ **整条计划到此为止**，而且必须**唤醒 Agent**：
-            #    不唤醒就会有一条计划永远挂在 WAIT 里（超时兜底会收它，但那是兜底）。
+            # ⚠️ 后续步骤派不出去 ⇒ **整条计划到此为止**。这里**不重规划**：
+            #    派不出去是通路故障（网关不可用 / 被拒），不是"这条路走不通"——
+            #    再规划一次还是要走同一个网关，只会重复同一个故障。
             reason = why or getattr(reply, 'message', '被网关拒绝')
-            with self._lock:
-                self._executor.cancel(plan_id)
-            self.get_logger().error(
-                f'★ 计划 {plan_id} 的第 {step_index} 步派发失败：{reason}'
-                f' —— 计划中止并唤醒 Agent')
+            # 这里走 `_close_task` 而**不是** `_settle_attempt`：没有终点事件，
+            # 所以没有"尝试结束"这回事（`_settle_attempt` 会记一条 wakeup，
+            # 而那条 wakeup 得自己补，否则 memory 里会缺这一笔）。
             self.memory.remember_wakeup(plan_id, step.skill, ts.FAILED, reason,
                                         now=time.monotonic())
+            self._close_task(plan_id, ts.FAILED,
+                             f'第 {step_index} 步派发失败：{reason}')
             return
         with self._lock:
             self._executor.bind_step(plan_id, idx, reply.task_id)
@@ -428,13 +565,25 @@ class AgentRuntime(Node):
                 # 要取消的是**当前那一步**在网关那边的任务，不是计划 id ——
                 # 走到第 3 步时，计划 id 指的是第 1 步，取消它等于什么也没停。
                 step_task = self._executor.current_step_task_id(rec.task_id)
+                cur_skill = rec.steps[rec.current].skill
             self.get_logger().error(
                 f'{rec.task_id} 超过 {rec.deadline - rec.submitted_at:.1f}s 仍无终态 '
                 f'（停在第 {rec.current + 1}/{rec.total} 步）'
                 f'—— 请求取消技能（**不**当作已完成）')
             self._request_cancel(step_task, 'Agent 侧超时')
             with self._lock:
-                self._executor.timeout(rec.task_id)
+                # ⚠️ `timeout` 结束的是**这次尝试**，不是任务 —— 所以**仍然**要走
+                #    `_settle_attempt`：它标的 `FAILED` 不在 `REPLANNABLE` 里，
+                #    于是会直接 `_close_task` 收尾。**收尾那一步不能省** —
+                #    省了记录就永远漏在表里（既不超时、也不淘汰）。
+                found = self._executor.timeout(rec.task_id)
+            if found:
+                # ⚠️ 报的是**技能名**，不是 `step_task`（那是网关任务号）——
+                #    memory 里那一栏是"哪个技能报的"，填成任务号就记错事实了。
+                self._settle_attempt(
+                    rec.task_id, cur_skill, ts.FAILED,
+                    f'超时 {rec.deadline - rec.submitted_at:.1f}s', False,
+                    '超时 —— 技能可能还在跑，已请求取消')
         self._publish_status()
 
     def _request_cancel(self, task_id, reason):

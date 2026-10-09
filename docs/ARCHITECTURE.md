@@ -88,10 +88,10 @@ Jetson Orin（L4T R36.4.3 / JetPack 6.x）是中央计算节点，承担：
 | 语音识别 ASR | `xf_mic_asr_offline`（厂商离线 ASR） | ✅ 包已存在，❓ 待实机验收 |
 | **Skill Gateway + Registry** | `embodied_skill_gateway`（Overlay）：D-005 的六项检查 + **数据驱动的注册表** + 任务表与 8 状态机。🔒 **唯一被允许直接调用技能服务的进程** | ✅ 已实现（2026-10-07，D-029/D-030/D-031/D-032） |
 | **Hybrid Command Router** | `embodied_command_router`（Overlay）：安全词 / 确定性命令 / 复杂任务三分类 + 中文命令解析。安全词判定**复用** `estop.py` 的整句匹配 | ✅ 已实现（2026-10-07，D-006） |
-| **Agent Runtime** | `embodied_agent_runtime`（Overlay）：**Executor**（WAIT 推进 / 超时 / 唤醒判定）+ **Event Manager** + **Memory**（有界）+ **Planner 两跳**（**D-038**：规则表优先，没命中才交给**云端 LLM** 选一个 task-tier 技能；**默认关闭**；单步）。🔒 红线在代码里执行，两条路**共用一个校验口** | ⚠️ 骨架 + LLM 接口已实现（2026-10-07，D-035 / D-038）；**未真机验证**、**未接真端点**；**重规划与多步计划未做** |
+| **Agent Runtime** | `embodied_agent_runtime`（Overlay）：**Executor**（WAIT 推进 / 超时 / 唤醒判定）+ **Event Manager** + **Memory**（有界）+ **Planner 两跳**（**D-038**：规则表优先，没命中才交给**云端 LLM** 选 task-tier 技能；**默认关闭**）+ **多步计划**（**D-043**：逐步过网关，Agent 只在计划结束时醒一次）+ **重规划**（**D-044**：`BLOCKED` / `TARGET_LOST` ⇒ 换一条走法，**必须不同且有界**）。🔒 红线在代码里执行，两条路**共用一个校验口** | ✅ 实现完成（D-035 / D-038 / D-043 / D-044）；✅ **地面端到端通过**（单步，2026-10-08）+ ✅ **干跑端到端 29/29**（2026-10-09）；⚠️ **未接真 LLM 端点** |
 | **Autonomous Skill** | `embodied_autonomous_skills`（Overlay）：第一个 task-tier 技能 `advance_until_blocked` —— **闭环**（每步重新问 LiDAR） | ⚠️ 已实现（2026-10-07，D-034）；**未真机验证**，受 `allow_motion` 闸门约束 |
 | 本地轻量 LLM | 后期加入，用于简单语言理解 / Tool Calling / 离线模式 | 📋 第一版不做 |
-| 云端 LLM 调用 | 复杂任务规划、多步骤推理、异常处理 | 🚧 **接口已接（D-038）**：OpenAI 兼容端点、**默认关闭**、**单步**（多步与重规划未做）；失败分类充分（超时/连不上/回包烂各是各的话），**绝不静默降级** |
+| 云端 LLM 调用 | 复杂任务规划、多步骤推理、异常处理 | 🚧 **接口已接（D-038）**：OpenAI 兼容端点、**默认关闭**、支持**多步计划**（D-043）与**重规划**（D-044，提示词里带上"试过什么、各自什么结果"）；失败分类充分（超时/连不上/回包烂各是各的话），**绝不静默降级**。⚠️ **未接真端点** |
 | TensorRT 视觉推理 | GStreamer → CUDA → TensorRT → YOLO → Tracker | 📋 |
 | 相机 Driver | `embodied_camera_driver`（Overlay，Driver 层）：收口厂商相机源——**重新打时间戳**（原始戳早 0.72 s） + **补发 TF 帧** `camera_link0 → camera`。只做确定性数据整形，不含语义/规划 | ✅ 已实现（2026-10-05） |
 | ROS2 | Humble | ✅ |
@@ -133,10 +133,11 @@ Hardware
 > 📌 **已落地的部分（2026-10-07）**：`embodied_skill_gateway`（Skill Gateway + 注册表 + 任务表）、
 > `embodied_command_router`（Hybrid Command Router，§7）、
 > `embodied_agent_runtime`（**Executor / Event Manager / Memory** + **Planner 两跳**：
-> 规则表优先，没命中才问**云端 LLM**；**默认关闭**、单步，**D-038**）、
+> 规则表优先，没命中才问**云端 LLM**；**默认关闭**，**D-038**）+ **多步计划**（**D-043**）
+> + **重规划**（**D-044**，§18 的闭环四段齐了）、
 > `embodied_autonomous_skills`（第一个 task-tier 技能）。
 > **Skill Manager 的独立进程形态仍是设计**（第一版与 Gateway 同进程，D-029 决策 4）。
-> 详见 **D-029 / D-030 / D-031 / D-032 / D-034 / D-035 / D-038**。
+> 详见 **D-029 / D-030 / D-031 / D-032 / D-034 / D-035 / D-038 / D-043 / D-044**。
 
 ### 5.2 自下而上的反馈流
 
@@ -282,8 +283,10 @@ Safety > Control > Skill > Agent
 > 📌 **已落地（2026-10-07）**：`embodied_command_router` 实现上面这张表的分流；
 > B 类**多走一跳 Skill Gateway**（D-029/D-031：所有动作必须过六项检查，没有旁路）。
 > C 类**转给 `embodied_agent_runtime`**，由它回答"能不能做"—— 路由器只负责分类（D-035）。
-> 而 Agent Runtime 的 Planner 是 **stub**（规则表默认空），所以 C 类**今天仍然会被拒绝**，
-> 但拒绝是**从 Agent 层发出的**，理由写清了是 Phase 7 未到。
+> 而 Agent Runtime **默认**下规则表是空的、LLM 那一跳是关的，所以 C 类**默认仍然会被拒绝**，
+> 但拒绝是**从 Agent 层发出的**，理由写清了是"没开"（而不是"不会"）。
+> ⚠️ **C 类仍然走不到今天**：`semantic.*` 技能一个都还没有 —— 规划器就算给出计划，
+> 也会在网关那里因"未注册的技能"被拒（找不到杯子这件事，本机还没有任何能力支撑）。
 >
 > ⚠️ **`停止追踪` 不是安全词**：判定用**整句匹配**（`embodied_safety_runtime/estop.py`），
 > 子串匹配会让厂商词表里的 `停止追踪` / `停止分拣` 全部误触发整机急停。

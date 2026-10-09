@@ -103,15 +103,52 @@ def skill_menu(registry):
     return menu
 
 
-def build_messages(text, menu):
-    """拼一轮对话。菜单以 JSON 附在系统消息里 —— 它就是"能选的东西"的**全部**。"""
-    return [
+#: 重规划时追加的那段系统消息。**它才是"再来一次"与"原样再来一次"的分界。**
+#: 没有它，同一段文本会问出同一个计划 —— 那样"重规划"就只是白跑一趟网络。
+RETRY_PROMPT = """⚠️ **这不是第一次**。你之前为这个任务给出的计划**已经执行过**，
+结果如下（从早到晚）：
+
+{tried}
+
+这些计划**都没成**。请再想一个**不同的**走法 ——
+换技能、换顺序、换参数都可以，但**不能与上面任何一条相同**：
+上一段里已经说过，重复的计划只会以同样的方式再失败一次。
+
+如果确实没有别的办法，就**如实拒绝**并说明为什么上面几条走不通、
+还缺什么能力 —— 这比再给一条一样的计划有用得多。"""
+
+
+def tried_note(tried, states=()):
+    """把"试过什么、结果如何"渲染成给模型看的一段话。
+
+    ⚠️ 结果（终态）**必须带上**：只列"试过什么"而不说"怎么失败的"，
+    模型无从判断该换哪个方向 —— 它只知道要不一样，不知道为什么。
+    """
+    lines = []
+    for i, steps in enumerate(tried or [], 1):
+        state = states[i - 1] if i - 1 < len(states) else ''
+        tail = f' —— 结果：{state}' if state else ''
+        lines.append(f'{i}. {planner.render_plan(steps)}{tail}')
+    return '\n'.join(lines)
+
+
+def build_messages(text, menu, tried=None, states=()):
+    """拼一轮对话。菜单以 JSON 附在系统消息里 —— 它就是"能选的东西"的**全部**。
+
+    :param tried: 已经试过的计划（每次尝试一份步骤列表）。非空时**追加一段**
+                  重规划说明 —— 见 `RETRY_PROMPT`，那是"换个走法"能成立的前提。
+    """
+    msgs = [
         {'role': 'system', 'content': SYSTEM_PROMPT},
         {'role': 'system',
          'content': '可用技能清单（这是全部，不许自己造）：\n'
                     + json.dumps(menu, ensure_ascii=False, indent=2)},
-        {'role': 'user', 'content': str(text)},
     ]
+    if tried:
+        msgs.append({'role': 'system',
+                     'content': RETRY_PROMPT.format(tried=tried_note(tried, states))})
+    msgs.append({'role': 'user', 'content': str(text)})
+    return msgs
 
 
 def _strip_code_fence(raw):
@@ -191,14 +228,16 @@ def _parse_reply(raw):
     raise ReplyError(f'既没有 steps / skill 也没有 refuse（收到：{sorted(obj)}）')
 
 
-def plan_with_llm(text, registry, client):
+def plan_with_llm(text, registry, client, tried=None, states=()):
     """问一次 LLM，把它提的东西**交给与规则表同一个校验口**。
 
+    :param tried: 已经试过的计划 —— 有值时这一问就是**重规划**，
+                  提示词里会告诉模型"这些都没成，换一个"（见 `RETRY_PROMPT`）。
     :return: `(PlanResult, raw_reply)`
     :raises ReplyError: 回包不合约定（调用方负责记原文并转成拒绝）
     :raises LlmUnavailable / LlmTransportError: 这一跳没跑成
     """
-    raw = client.complete(build_messages(text, skill_menu(registry)))
+    raw = client.complete(build_messages(text, skill_menu(registry), tried, states))
     try:
         kind, payload = parse_reply(raw)
     except ReplyError as exc:
@@ -212,7 +251,7 @@ def plan_with_llm(text, registry, client):
     return planner.accept_plan(steps, registry, 'LLM'), raw
 
 
-def plan_task(text, rules, registry, client, guard=None):
+def plan_task(text, rules, registry, client, guard=None, tried=None, states=()):
     """**组合那两跳**：规则表优先，没命中才问 LLM。
 
     :param client: 配好的 `OpenAiCompatClient`，或 `None`（= 这一跳没开）。
@@ -228,6 +267,13 @@ def plan_task(text, rules, registry, client, guard=None):
 
         ⚠️ 它**只护住 LLM 那一跳**：规则命中是 O(1) 的纯查表，
         不该被一次网络调用连累 —— 所以 `guard` 在规则命中时**根本不碰**。
+    :param tried: 已经试过的计划 / 对应的终态。**只在重规划时非空** ——
+        它会被带进 LLM 那一跳的提示词（见 `RETRY_PROMPT`）。
+
+        ⚠️ 它**不改变规则表那一跳**：规则表是按文本查的，同一句话就只有同一个答案。
+        所以规则表定义的任务重规划会得到同一个计划，然后被
+        `replan.check_new_plan` **当场挡掉**并说明原因 —— 那是正确结局，
+        因为**规则表里确实没有第二个答案**（要别的走法，得先把那条规则改掉）。
     :return: `Composed(result, source, raw)`
     """
     result = planner.plan(text, rules, registry)
@@ -250,7 +296,7 @@ def plan_task(text, rules, registry, client, guard=None):
                             SOURCE_NONE, '')
     try:
         try:
-            result, raw = plan_with_llm(text, registry, client)
+            result, raw = plan_with_llm(text, registry, client, tried, states)
         except LlmUnavailable as exc:
             why = f'{result.reason}，且 LLM 不可用：{exc}'
             return Composed(planner.PlanResult(False, [], why), SOURCE_NONE, '')

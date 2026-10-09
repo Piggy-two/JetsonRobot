@@ -161,6 +161,53 @@ def _steps_from_rule(rule):
     return None, f'规则表里这条既没有 skill 也没有 steps：{rule!r}'
 
 
+def plan_key(steps):
+    """把一个计划压成可比较的键：`((技能, 参数元组), ...)`。
+
+    参数按**键排序**再转元组 —— 否则 `{a:1,b:2}` 与 `{b:2,a:1}` 会被当成两个计划，
+    而它们要机器人做的事**一模一样**。
+    """
+    out = []
+    for s in steps or []:
+        try:
+            args = tuple(sorted((str(k), repr(v)) for k, v in (s.args or {}).items()))
+        except AttributeError:
+            args = ()
+        out.append((getattr(s, 'skill', str(s)), args))
+    return tuple(out)
+
+
+def same_plan(a, b):
+    """两个计划是不是**同一件事**（技能序列与参数都一样）。
+
+    ⚠️ 这条不是优化，是**防死循环的结构件**：
+    重规划若拿同一段文本问同一个规划器，**很可能得到一模一样的计划** ——
+    那就会"计划 → 失败 → 再规划 → 同一个计划"无限转下去。
+    ⇒ 调用方必须用它在派发前挡一道，见 `agent_runtime` 的 `_maybe_replan`。
+    """
+    return plan_key(a) == plan_key(b)
+
+
+def render_plan(steps):
+    """把一个计划画成**给模型看**的一行：`技能(参数=值) → 技能(参数=值)`。
+
+    ⚠️ 与 `agent_runtime._plan_label` 长得像但**给的人不同**：那个是日志标签
+    （只列技能名，够人扫一眼）；这个要进**提示词**，所以带上参数 ——
+    不带参数的话，"换个走法"在模型眼里就没有可换的东西（它只会原样重来一遍）。
+
+    参数按**名字排序**，好让两次渲染可逐字比较（模型会照着上一行的样子回）。
+    """
+    out = []
+    for s in steps or []:
+        try:
+            items = sorted((str(k), v) for k, v in (s.args or {}).items())
+        except AttributeError:
+            items = []
+        args = ', '.join(f'{k}={v!r}' for k, v in items)
+        out.append(f'{getattr(s, "skill", s)}({args})')
+    return ' → '.join(out)
+
+
 def plan(text, rules, registry):
     """规则表那一跳：把一句自然语言任务映射成一个**计划**。
 
