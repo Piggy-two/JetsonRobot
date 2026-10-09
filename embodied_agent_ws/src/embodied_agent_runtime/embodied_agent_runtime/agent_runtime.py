@@ -68,6 +68,15 @@ from embodied_skills_interfaces.srv import AgentTask, SkillCancel, SkillInvoke
 from embodied_agent_runtime import execution, llm_client, llm_planner, planner, replan
 from embodied_agent_runtime.memory import AgentMemory
 
+#: `llm_planner.source` 的人话——**给受理答复和演示用**。
+#: ⚠️ 两条路**行为完全一样**（同一个校验口、同样的红线），所以"来自谁"只是措辞，
+#: 不是可信度差异 —— 不要把它读成"规则表更可信"或"LLM 更聪明"。
+_SOURCE_LABEL = {
+    llm_planner.SOURCE_RULES: '规则表',
+    llm_planner.SOURCE_LLM: 'LLM',
+    llm_planner.SOURCE_NONE: '（无）',
+}
+
 # 网关的注册表是"有哪些技能"的唯一事实来源 —— 本节点直接读**同一份数据**，
 # 而不是再抄一份技能名单（抄一份就会漂移）。D-029：Registry 是数据。
 from embodied_skill_gateway import task_state as ts
@@ -331,6 +340,11 @@ class AgentRuntime(Node):
         n = len(result.steps)
         res.message = (f'已受理并派发 {result.steps[0].skill}'
                        f'（{"单步" if n == 1 else f"共 {n} 步，第 1 步已派发"}；'
+                       # ⚠️ **"这条计划是谁给的"必须写在受理答复里**：演示时人一定会问
+                       #    "是模型想的还是查表的"，而这两件事在**行为上完全一样**
+                       #    （见 `llm_planner.plan_task`：两条路共用同一个校验口）。
+                       #    只写在日志里不够 —— 答复才是调用方**手上**的那份信息。
+                       f'来自 {_SOURCE_LABEL.get(source, source)}；'
                        f'处于 WAIT，事件到达时唤醒）')
         self.get_logger().info(
             f'受理 {reply.task_id}：{self._plan_label(result.steps)} —— 进入 WAIT')

@@ -57,7 +57,8 @@ DEEPSEEK_API_KEY=... ros2 launch embodied_bringup demo.launch.py \
 
 ## 与验收工装的关系
 
-它只**起栈**，不**判定**。判定在 `tools/` 下：
+它只**起栈**，不**判定**。判定在 `tools/` 下。**完整演示步骤（含"摆位决定能看到哪一拍"）见 [`docs/DEMO.md`](../../../docs/DEMO.md)**：
+
 
 | 工装 | 验什么 | 要不要人 |
 |---|---|---|
@@ -66,3 +67,4 @@ DEEPSEEK_API_KEY=... ros2 launch embodied_bringup demo.launch.py \
 | `upper_layer_dryrun_acceptance.py` | 上层链路 + 干跑积分 | 不要 |
 | `ground_motion_acceptance.py` | 走到位了没有（**地面**） | **要** |
 | `suspended_motion_acceptance.py` | 通电驱动 + 停得住（**架空**） | **要** |
+| `agent_ground_acceptance.py` | 一句话 → 真模型 → **真车运动**（独立基准：`/scan` + IMU） | **要** |
