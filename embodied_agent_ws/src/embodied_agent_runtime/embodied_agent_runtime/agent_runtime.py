@@ -114,7 +114,13 @@ class AgentRuntime(Node):
         # ⚠️ 只写**变量名**，不写密钥本身 —— 密钥绝不进仓库（CLAUDE.md §6）。
         self.declare_parameter('llm_api_key_env', '')
         self.declare_parameter('llm_timeout', 8.0)
-        self.declare_parameter('llm_max_tokens', 400)
+        # ⚠️ **4096 而不是一个小数目**：2026-10-09 对着真端点（DeepSeek）实测发现，
+        #    **推理模型的思维链也计入 `max_tokens`**，而且抖动极大 —— 同一个重规划
+        #    提示词三次实测分别消耗 321 / **1200(吃满，回包全空)** / 614 tokens，
+        #    另一轮光推理就用了 **2708**。默认 400 会让重规划那一问**基本必空**，
+        #    而症状是"回包里的内容是空的"，看起来像网络故障（见 DEV_NOTES 坑 38）。
+        #    这个值是**上限**、不是计费量，调大几乎不花钱；真正的护栏是 `llm_timeout`。
+        self.declare_parameter('llm_max_tokens', 4096)
 
         g = lambda n: self.get_parameter(n).value          # noqa: E731
 
@@ -467,8 +473,20 @@ class AgentRuntime(Node):
             self._close_task(plan_id, state,
                              f'{replan.REPLAN_PLANNER_REFUSED}（{plan.source}）：{result.reason}')
             return
+        # ⚠️ 这里用 `render_plan`（**带参数**）而不是 `_plan_label`（只有技能名）：
+        #    "换了走法"的判据是**技能 + 参数**，只打技能名的话，
+        #    `advance(0.15)` → `advance(0.1)` 在日志里长得和第 1 次一模一样，
+        #    于是**没换走法被读成换了**、或者是真换了你也不知道 —— 两种都可能。
+        #    实测（2026-10-09，真模型）正是撞上这一条才加的。
         self.get_logger().info(
-            f'↻ 重规划得到新计划：{self._plan_label(result.steps)}（来自 {plan.source}）')
+            f'↻ 重规划得到新计划：{planner.render_plan(result.steps)}'
+            f'（来自 {plan.source}）')
+        if plan.raw:
+            # 与首次受理同一条纪律：**模型说了什么必须留得下来**。
+            # ⚠️ 被截断 / 调用失败时这一行**不会出现**（那种情况下 `raw` 是空的，
+            #    原因写在 `plan.result.reason` 里）—— 所以"没有原始回包"本身就是
+            #    一条线索：它不是解析失败，而是**根本没拿到完整回话**。
+            self.get_logger().info(f'↻ LLM 原始回包：{plan.raw[:500]!r}')
 
         with self._lock:
             rec = self._executor.get(plan_id)

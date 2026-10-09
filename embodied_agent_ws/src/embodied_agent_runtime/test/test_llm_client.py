@@ -13,7 +13,8 @@ import pytest
 
 from embodied_agent_runtime import llm_client
 from embodied_agent_runtime.llm_client import (
-    LlmTransportError, LlmUnavailable, OpenAiCompatClient, read_api_key)
+    LlmTransportError, LlmTruncated, LlmUnavailable, OpenAiCompatClient,
+    read_api_key)
 
 
 def client(**kw):
@@ -105,8 +106,53 @@ def test_unexpected_envelope_is_transport_error():
 
 def test_empty_content_is_transport_error():
     c = client(transport=lambda *a: envelope('   '))
-    with pytest.raises(LlmTransportError):
+    with pytest.raises(LlmTransportError) as e:
         c.complete([{'role': 'user', 'content': 'hi'}])
+    assert 'finish_reason' in str(e.value)      # 把对端给的原因带出来
+
+
+# ---------- ★ 被截断 ≠ 调用失败（真端点实测出来的，见 DEV_NOTES 坑 38）----------
+
+def test_length_with_empty_content_is_truncation_not_call_failure():
+    """★ 推理模型把 `max_tokens` 全用在思维链上 ⇒ **一个字都没轮上**。
+
+    真端点实测：同一个提示词三次里坏一次（consumption 321 / **1200 吃满** / 614）。
+    这**不是**调用失败 —— 网络是好的、对端也答了，是我们给的空间不够。
+    报成"调用失败"会让人去查网络，而该做的是调大 `max_tokens`。
+    """
+    c = client(max_tokens=1200, transport=lambda *a: {
+        'choices': [{'finish_reason': 'length',
+                     'message': {'role': 'assistant', 'content': ''}}],
+        'usage': {'completion_tokens_details': {'reasoning_tokens': 1200}}})
+    with pytest.raises(LlmTruncated) as e:
+        c.complete([{'role': 'user', 'content': 'hi'}])
+    assert 'max_tokens=1200' in str(e.value)
+    assert '1200' in str(e.value) and '推理消耗' in str(e.value)
+    assert '调用失败' not in str(e.value)
+
+
+def test_length_with_partial_content_is_still_truncation():
+    """★ 半截 JSON 也是截断 —— 只看"内容空不空"会漏掉这一种，
+    然后被下游报成"回包无法解析"，把**预算不够**说成**模型不会说话**。"""
+    c = client(transport=lambda *a: {
+        'choices': [{'finish_reason': 'length',
+                     'message': {'role': 'assistant',
+                                 'content': '{"skill": "autonomous.adv'}}]})
+    with pytest.raises(LlmTruncated):
+        c.complete([{'role': 'user', 'content': 'hi'}])
+
+
+def test_truncation_is_a_subclass_so_old_handlers_still_catch_it():
+    """⚠️ 它是 `LlmTransportError` 的子类：老的 `except` 不会漏接（不会变成未捕获异常）。"""
+    assert issubclass(LlmTruncated, LlmTransportError)
+
+
+def test_stop_with_content_is_of_course_fine():
+    """反向对照：`finish_reason=stop` 且有内容 ⇒ 正常返回（别把好的也当成坏的）。"""
+    c = client(transport=lambda *a: {
+        'choices': [{'finish_reason': 'stop',
+                     'message': {'role': 'assistant', 'content': '{"skill": "x"}'}}]})
+    assert c.complete([{'role': 'user', 'content': 'hi'}]) == '{"skill": "x"}'
 
 
 def test_non_dict_reply_is_transport_error():

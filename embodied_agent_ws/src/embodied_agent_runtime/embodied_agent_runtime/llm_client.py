@@ -36,6 +36,20 @@ class LlmTransportError(Exception):
     """配置是好的，但这次调用失败了：网络、超时、HTTP 错误码、回包不成形。"""
 
 
+class LlmTruncated(LlmTransportError):
+    """**回包被 `max_tokens` 截断了** —— 对端答了，是我们给的空间不够。
+
+    ⚠️ 为什么单独立一类（它是 `LlmTransportError` 的子类，老的 except 不会漏接）：
+    它和"调用失败"**要做的事完全相反** ——
+      · 调用失败 → 去看网络、对端、超时（`timeout_s`）；
+      · 被截断   → 去调大 `max_tokens`（网络是好的，对端也是好的）。
+    混成一句"LLM 调用失败"，会把排查方向整个指错，而且**它看起来像偶发故障**：
+    同一个提示词这次成、下次不成（实测三次里坏一次），于是最容易被读成
+    "网络不稳" —— 而真正的原因是**推理模型的思维链也计入 `max_tokens`**，
+    消耗量抖动极大（同一提示词实测 215 ~ 2708 tokens）。
+    """
+
+
 def read_api_key(env_name):
     """从环境变量读密钥。**读不到就返回 None**，不抛 —— 让调用方决定怎么表述。"""
     if not env_name:
@@ -124,9 +138,29 @@ class OpenAiCompatClient:
         if reply.get('error'):
             raise LlmTransportError(f'端点返回错误：{reply["error"]}')
         try:
-            content = reply['choices'][0]['message']['content']
+            choice = reply['choices'][0]
+            content = choice['message']['content']
         except (KeyError, IndexError, TypeError) as exc:
             raise LlmTransportError(f'回包结构不认识（缺 choices[0].message.content）：{exc}') from exc
+
+        # ⚠️ **先看 `finish_reason`，再看内容** —— 顺序不能反。
+        #    截断的两种形态都要当成截断：
+        #      ① content 为空（思维链把预算吃光了，一个字都没轮上）；
+        #      ② content 有东西但是**半截 JSON**（`{"skill": "…` 就断了）。
+        #    只看"内容空不空"会漏掉 ②，而 ② 更坏：半截 JSON 会被下游报成
+        #    "回包无法解析"，把"预算不够"说成"模型不会说话"。
+        reason = choice.get('finish_reason')
+        used = (reply.get('usage') or {}).get('completion_tokens_details') or {}
+        thought = used.get('reasoning_tokens')
+        extra = f'（本次推理消耗 {thought} tokens）' if thought else ''
+        if reason == 'length':
+            raise LlmTruncated(
+                f'回包被截断：max_tokens={self.max_tokens} 用完了{extra}。'
+                f'推理模型的思维链**也计入**这笔预算，用量抖动很大 —— '
+                f'调大 max_tokens，或换一个不做思维链的模型')
+
         if not isinstance(content, str) or not content.strip():
-            raise LlmTransportError('回包里的内容是空的')
+            # 到这里 finish_reason 不是 length：对端确实没给内容，但**不是被我们截的**
+            raise LlmTransportError(
+                f'回包里的内容是空的（finish_reason={reason!r}）')
         return content

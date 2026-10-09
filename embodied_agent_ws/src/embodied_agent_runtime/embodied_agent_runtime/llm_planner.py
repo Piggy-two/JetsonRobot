@@ -23,7 +23,8 @@ import json
 from collections import namedtuple
 
 from embodied_agent_runtime import planner
-from embodied_agent_runtime.llm_client import LlmTransportError, LlmUnavailable
+from embodied_agent_runtime.llm_client import (
+    LlmTransportError, LlmTruncated, LlmUnavailable)
 
 #: 组合结果：**结果** + 是哪一跳产生的（进日志） + LLM 的原始回包（可审计，没问就是空）
 Composed = namedtuple('Composed', 'result source raw')
@@ -300,6 +301,14 @@ def plan_task(text, rules, registry, client, guard=None, tried=None, states=()):
         except LlmUnavailable as exc:
             why = f'{result.reason}，且 LLM 不可用：{exc}'
             return Composed(planner.PlanResult(False, [], why), SOURCE_NONE, '')
+        except LlmTruncated as exc:
+            # ⚠️ **必须排在 `LlmTransportError` 前面**（它是它的子类）。
+            #    措辞刻意**不出现"调用失败"四个字** —— 一是要人去看**预算**而不是网络，
+            #    二是这句话本身要能被 grep：查"有没有把截断误报成调用失败"时，
+            #    带否定的句子（"不是调用失败"）会把自己也命中。
+            why = (f'{result.reason}；LLM 回包被**截断**（**预算**问题，'
+                   f'不是网络问题）：{exc}')
+            return Composed(planner.PlanResult(False, [], why), SOURCE_LLM, '')
         except LlmTransportError as exc:
             why = (f'{result.reason}；LLM 调用失败'
                    f'（上限 {client.timeout_s:g}s）：{exc}')

@@ -15,7 +15,8 @@
 import pytest
 
 from embodied_agent_runtime import planner
-from embodied_agent_runtime.llm_client import LlmTransportError, LlmUnavailable
+from embodied_agent_runtime.llm_client import (
+    LlmTransportError, LlmTruncated, LlmUnavailable)
 from embodied_agent_runtime.llm_planner import (
     REFUSE_LLM_DISABLED, SOURCE_LLM, SOURCE_NONE, SOURCE_RULES,
     ReplyError, build_messages, parse_reply, plan_task, plan_with_llm, skill_menu)
@@ -286,6 +287,21 @@ def test_transport_failure_reports_the_timeout_ceiling():
     out = plan_task('找杯子', {}, _registry(), c)
     assert out.result.accepted is False
     assert '调用失败' in out.result.reason and '8' in out.result.reason
+    assert out.source == SOURCE_LLM
+
+
+def test_truncation_is_not_reported_as_a_failed_call():
+    """★ **被截断 ≠ 调用失败**（真端点实测出来的，见 DEV_NOTES 坑 38）。
+
+    这一条要的正是"**不要**说成调用失败"：说了的话，人会去查网络与超时，
+    而该做的是调大 `llm_max_tokens`。措辞分开，排查方向才不会指错。
+    """
+    c = FakeClient(error=LlmTruncated('回包被截断：max_tokens=400 用完了'))
+    out = plan_task('找杯子', {}, _registry(), c)
+    assert out.result.accepted is False
+    assert '截断' in out.result.reason
+    assert '调用失败' not in out.result.reason       # ★ 这一条是这个测试的要点
+    assert 'max_tokens=400' in out.result.reason     # 且给出该改哪个参数
     assert out.source == SOURCE_LLM
 
 
