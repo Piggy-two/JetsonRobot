@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>embodied_bringup</name>
+  <version>0.1.0</version>
+  <description>
+    一键拉起本项目的整栈（**不含厂商 ~/ros2_ws**）—— 只为了让"起一次栈"这件事
+    不再由人手敲六条 launch 命令（参数多，起错了会表现得像"功能坏了"）。
+    ⚠️ 它不是运行时组件：真正决定安全的是各节点自己的闸门默认值。
+  </description>
+  <maintainer email="piggy@example.com">Piggy-two</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>embodied_agent_runtime</exec_depend>
+  <exec_depend>embodied_autonomous_skills</exec_depend>
+  <exec_depend>embodied_control_skills</exec_depend>
+  <exec_depend>embodied_lidar_driver</exec_depend>
+  <exec_depend>embodied_motor_driver</exec_depend>
+  <exec_depend>embodied_safety_runtime</exec_depend>
+  <exec_depend>embodied_skill_gateway</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

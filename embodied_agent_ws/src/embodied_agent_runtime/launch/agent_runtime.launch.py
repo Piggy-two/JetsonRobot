@@ -67,6 +67,11 @@ def generate_launch_description():
             'llm_timeout', default_value='8.0',
             description='单次 LLM 调用的硬上限（秒）。超了按调用失败拒绝，不静默降级'),
         DeclareLaunchArgument(
+            'max_replans', default_value='2',
+            description='重规划预算（D-044）：一次计划失败后最多换几条走法。'
+                        '0 = 关掉（计划失败就此收手）。⚠️ 每次重规划都要**重新过** '
+                        'allow_motion 闸门，所以它不会让车凭空多出一种行为'),
+        DeclareLaunchArgument(
             'allow_motion', default_value='false',
             description='三层闸门：是否允许派发可能引起运动的技能。'
                         '⚠️ 打开它不等于车会动 —— 还要看网关与 Motor Driver'),
@@ -83,6 +88,7 @@ def generate_launch_description():
                 'llm_model': LaunchConfiguration('llm_model'),
                 'llm_api_key_env': LaunchConfiguration('llm_api_key_env'),
                 'llm_timeout': LaunchConfiguration('llm_timeout'),
+                'max_replans': LaunchConfiguration('max_replans'),
             }],
         ),
     ])
