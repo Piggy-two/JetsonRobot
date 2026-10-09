@@ -201,7 +201,7 @@ def main():
             print(f'  📏 摆位：正前方参照面 {f0:.2f} m（原始 `/scan`）')
             print('     要看到"**被挡住 → 自己换一条路**"那一拍，'
                   '前方就得**比计划里的受阻阈值更近**'
-                  '（规则表示例用的是 0.5 m）——')
+                  '—— 规则表示例用 0.5 m，**真模型每次自己定**（策略上限 1.0 m）——')
             print('     想看到它，把车挪到离障碍 0.5 m 以内；'
                   '想看到"一路走通"，就让它前方开阔。')
             print()
@@ -223,6 +223,14 @@ def main():
             print(f'     {res.message}')
             return 1
 
+        #: ★ **"换了走法"的判据是 Agent 的唤醒计数**，不是"派发次数超过了计划的步数"。
+        #:    唤醒计数**每次尝试结束才 +1**（`_settle_attempt` 记的那一笔），
+        #:    所以"这次派发之前计数涨过"⇒ 上一次尝试已经结束 ⇒ 这是一条**新计划**。
+        #:    ⚠️ 第一版用的是"派发次数 > 首条计划的步数" —— 于是**新计划自己的第 2、3 步
+        #:    也全被贴上"换了走法"**（实测：5 次派发贴了 4 条）。那种叙述错得很难看，
+        #:    因为它把"一个计划的内部步骤"说成了"一次次改主意"。
+        wake_base = node.status[2] if node.status else 0.0
+        last_wake = wake_base
         n_steps = plan_step_count(res.message)
         print('  ① 规划好了 ✅')
         print(f'     {res.message}')
@@ -230,6 +238,7 @@ def main():
         print('  ② 执行（每一步都各自过网关，六项检查一遍不少）：')
 
         seen = 0
+        attempt = 1
         last_change = time.monotonic()
         last_n = 0
         while time.monotonic() - t0 < args.timeout:
@@ -241,9 +250,13 @@ def main():
                 skill, state = node.events[-1]
                 if state == 'RUNNING':
                     seen += 1
-                    extra = ('' if seen <= n_steps else
-                             ' —— ★ **计划的步骤之外又多了一次**：'
-                             '没有人再说话，Agent 自己换了一条走法')
+                    wakes = node.status[2] if node.status else last_wake
+                    extra = ''
+                    if wakes > last_wake:
+                        attempt += 1
+                        extra = (f' —— ★ **没有人再说话，Agent 自己换了走法**'
+                                 f'（第 {attempt} 次尝试）')
+                        last_wake = wakes
                     print(f'     → 第 {seen} 次派发：{skill}{extra}')
                 elif state in TERMINAL:
                     print(f'       {TERMINAL_WORDS.get(state, state)}〔{skill}〕')
