@@ -41,7 +41,12 @@ Decision = namedtuple('Decision', 'valid found detail')
 #:   frames     —— 窗口里有几帧可用的
 #:   best       —— 窗口里得分最高的那个匹配检出（None = 一帧都没看到）
 #:   quality_min —— 窗口里**最低**的那一帧清晰度（否定结论用最差的那帧说话）
-Window = namedtuple('Window', 'frames best quality_min')
+#:   best_below  —— 窗口里**看到了、但分数低于调用方门槛**的那个（None = 连不达标的都没有）。
+#:                 ⚠️ 它不是为了"放宽"，是为了**别把话说得比事实强**：
+#:                 2026-10-09 实机试出来的 —— 人站在 0.84，调用方要 0.9，
+#:                 回答"最近 8 帧里都没有 person"**按定义没错、但人读到的是"没有人"**。
+#:                 低于门槛**也必须说出来**。
+Window = namedtuple('Window', 'frames best quality_min best_below')
 
 
 def side_of(cx, width):
@@ -82,7 +87,7 @@ def label_is_known(label, known_labels):
 
 
 def decide(*, model_ready, label_known, frame_age_s, frame_max_age_s,
-           window, quality_min, min_frames, label, known_hint=''):
+           window, quality_min, min_frames, min_score, label, known_hint=''):
     """把"能不能回答、怎么回答"收在**一处**。返回 `Decision`。
 
     :param frame_age_s: 距**最新**一帧的秒数；从没收到过帧时为 None
@@ -123,6 +128,15 @@ def decide(*, model_ready, label_known, frame_age_s, frame_max_age_s,
             False, False,
             f'最近只拿到 {window.frames} 帧（要 ≥ {min_frames} 帧才够确认"没有"）'
             f'—— 不知道，不是"没有"')
+
+    if window.best_below is not None:
+        # ★ 看到了、但不够调用方要的那个分 —— **必须说出来**，
+        #   否则回答会读成"这里没有人"，而人就在那儿（差距只是门槛）。
+        b = window.best_below
+        return Decision(
+            True, False,
+            f'**看到了 {label}（score={b.score:.2f}），但低于你要的 {min_score:g}** —— '
+            f'按你的标准算"没有"，但画面里确实有它（要么放宽门槛，要么换个判断办法）')
 
     if window.quality_min < quality_min:
         # ★★ 本模块存在的理由

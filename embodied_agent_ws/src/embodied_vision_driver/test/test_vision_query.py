@@ -23,14 +23,16 @@ def call(**kw):
     """
     base = dict(model_ready=True, label_known=True, frame_age_s=0.05,
                 frame_max_age_s=0.5, label='person', known_hint='',
-                quality_min=100.0, min_frames=3,
-                window=vq.Window(frames=10, best=None, quality_min=500.0))
+                quality_min=100.0, min_frames=3, min_score=0.3,
+                window=vq.Window(frames=10, best=None, quality_min=500.0,
+                                 best_below=None))
     base.update(kw)
     return vq.decide(**base)
 
 
-def window(best=None, frames=10, quality_min=500.0):
-    return vq.Window(frames=frames, best=best, quality_min=quality_min)
+def window(best=None, frames=10, quality_min=500.0, best_below=None):
+    return vq.Window(frames=frames, best=best, quality_min=quality_min,
+                     best_below=best_below)
 
 
 # ==========================================================================
@@ -202,3 +204,30 @@ def test_side_of_a_degenerate_width_is_zero_not_a_crash():
 def test_label_is_known_is_case_insensitive():
     assert vq.label_is_known('Person', ['person', 'cup']) is True
     assert vq.label_is_known('bottle', ['person', 'cup']) is False
+
+
+# ==========================================================================
+# ★ 低于门槛的"看到了"也必须说出来（2026-10-09 实机试出来的）
+# ==========================================================================
+
+def test_a_sighting_below_the_callers_threshold_is_reported_not_denied():
+    """★★ 人站在 1 m 处、模型给 0.84，而调用方要 0.9。
+
+    按定义"没有 ≥0.9 的 person"是对的，但回答"最近 8 帧里都没有 person"
+    **读起来是"这里没有人"** —— 而人就在那儿。
+    ⇒ 低于门槛**也要说出来**，让调用方自己决定是放宽门槛还是换个办法。
+    """
+    d = call(min_score=0.9,
+             window=window(best=None, best_below=Det('person', 0.84)))
+    assert d.valid is True          # 我们**确实看过**了
+    assert d.found is False         # 按调用方的标准，不算数
+    assert '看到了 person' in d.detail
+    assert '0.84' in d.detail and '低于你要的 0.9' in d.detail
+
+
+def test_a_qualifying_sighting_wins_over_a_sub_threshold_one():
+    """够分的那个优先 —— "低于门槛"只是兜底措辞，不该盖过真正的答案。"""
+    d = call(min_score=0.3,
+             window=window(best=Det('person', 0.85), best_below=None))
+    assert (d.valid, d.found) == (True, True)
+    assert '看到了 person' in d.detail

@@ -247,14 +247,20 @@ class VisionDriver(Node):
             # ★ 窗口 = 最近 `confirm_window` 秒里**每一次推理的结果**（不是某一帧）
             span = float(self.get_parameter('confirm_window').value)
             recent = [h for h in self._history if now - h[0] <= span]
-        best, qmin = None, None
+        best, qmin, below = None, None, None
         for _t, dets_i, q_i in recent:
             b = vq.pick_best(dets_i, req.label, req.min_score)
             if b is not None and (best is None or b.score > best.score):
                 best = b
+            # ⚠️ 同时记住"看到了但不够分"的那个：低于门槛也不能假装没看见
+            b_any = vq.pick_best(dets_i, req.label, 0.0)
+            if b_any is not None and b_any.score < req.min_score \
+                    and (below is None or b_any.score > below.score):
+                below = b_any
             qmin = q_i if qmin is None else min(qmin, q_i)
         window = vq.Window(frames=len(recent), best=best,
-                           quality_min=-1.0 if qmin is None else float(qmin))
+                           quality_min=-1.0 if qmin is None else float(qmin),
+                           best_below=below)
         quality = float(qmin) if qmin is not None else -1.0
 
         known = list(self._model.names.values()) if self._ready else []
@@ -274,6 +280,7 @@ class VisionDriver(Node):
             window=window,
             quality_min=float(self.get_parameter('quality_min').value),
             min_frames=int(self.get_parameter('min_frames').value),
+            min_score=float(req.min_score),
             label=req.label, known_hint=hint)
 
         res.valid, res.found, res.detail = d.valid, d.found, d.detail
