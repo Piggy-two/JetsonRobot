@@ -163,3 +163,47 @@ def test_shipped_registry_yaml_loads_and_passes_self_check():
     assert 'control.move_relative' in reg
     assert 'agent.planner' not in reg.require('control.move_relative').allowed_principals
     assert 'agent.planner' in reg.require('primitive.path_clear').allowed_principals
+
+
+# ==========================================================================
+# ★ 每个 srv_type 都必须被网关登记过（2026-10-09 真事）
+# ==========================================================================
+
+def test_unknown_srv_types_reports_the_unregistered_ones(tmp_path):
+    """★ 只在注册表里加一条技能、忘了往网关的 `_SRV_TYPES` 登记 —— 会怎样？
+
+    注册表加载正常、`~/list` 里 `available: true`、准入检查也过；
+    一直到**真的有人调它**、且恰好派发到那一步才报"未知的 srv_type"。
+    这个函数就是让那种错**在启动时**就被抓住。
+    """
+    import yaml
+    from embodied_skill_gateway.registry import Registry
+    p = tmp_path / 'reg.yaml'
+    p.write_text(yaml.safe_dump({'skills': {
+        'semantic.look_for': {
+            'tier': 'task', 'transport': 'service',
+            'target': '/x', 'srv_type': 'embodied_skills_interfaces/LookFor',
+            'allowed_principals': ['operator.manual'], 'params': [],
+        }}}), encoding='utf-8')
+    reg = Registry.from_yaml(str(p))
+    assert reg.unknown_srv_types({'embodied_skills_interfaces/LookFor'}) == []
+    assert reg.unknown_srv_types({'std_srvs/Trigger'}) == \
+        ['embodied_skills_interfaces/LookFor']
+
+
+def test_the_shipped_registry_has_no_unregistered_srv_type():
+    """★ 钉住**随仓库发布的那份注册表**：它引用的每个类型都必须在网关的表里。
+
+    这条测试的价值 = 下一个人加技能时，忘登记会在**跑测试时**就被拦住，
+    而不是等到现场演示那一条任务失败。
+    """
+    import os
+
+    from embodied_skill_gateway.registry import Registry
+    from embodied_skill_gateway.skill_gateway import _SRV_TYPES
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    reg = Registry.from_yaml(os.path.join(here, 'config', 'skill_registry.yaml'))
+    unknown = reg.unknown_srv_types(_SRV_TYPES.keys())
+    assert unknown == [], (
+        f'这些 srv_type 没在 skill_gateway._SRV_TYPES 里登记：{unknown}。'
+        f'不登记的话，调用这些技能会一路走到派发才失败')

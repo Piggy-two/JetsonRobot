@@ -1,0 +1,34 @@
+# **第一个 task-tier（Semantic）技能**：看一眼视野里有没有某个类别的东西。
+#
+# 为什么它算 task-tier 而不是 Primitive（判据同 D-026 / D-034 / D-042）：
+#   真正要看的是**"我知不知道"**，而不是"检测器给了几条" ——
+#   画面糊 / 没有新鲜帧 / 模型没就绪 / 类别不在模型表里，
+#   这四种情况都必须与"确认真没有"分开（D-046 / DEV_NOTES 坑 43）。
+#   那是**语义级**的判断，不是一次查询能表达的，所以它进 8 状态机。
+#
+# 🔒 **状态映射就是本技能的语义**（`look_plan.py` 里是纯函数，有单测）：
+#     TARGET_FOUND —— 看到了                     （正面证据）
+#     TARGET_LOST  —— **确认没有**（画面质量达标才敢这么说）
+#     FAILED       —— **不知道**（糊 / 没帧 / 模型没就绪 / 类别不在表里）
+#   ⚠️ 把"不知道"报成 TARGET_LOST，上层就会得出"这里没有目标"的结论 ——
+#      与 D-028 同一条铁律：**不知道 ≠ 没有**（那里是"不知道 ≠ 安全"）。
+#
+# ⚠️ 本技能**只读、不动**（网关注册表里 `causes_motion: false`）——
+#    它**不受** `allow_motion` 闸门约束，也不需要人看护。
+#
+# ⚠️ **单目相机**：`side` 只是画面里的左右，**不含距离、不含世界坐标**（D-017）。
+
+string label            # 要查的类别名（模型类别表里的，如 person / bottle / cup）。
+                        # ⚠️ 不在表里 ⇒ FAILED（"不知道"），不是 TARGET_LOST ——
+                        #    否则问"杯子"而模型只认 cup 会**永远**说"没有杯子"，且不报错
+float64 min_score       # 低于它不算数。⚠️ 由**调用方**定：nano 模型在杂物场景常给 0.2~0.4
+---
+bool success            # = (state == TARGET_FOUND)，与其它 task-tier 技能同规矩
+string state            # **必须是 task-tier 终态之一**：TARGET_FOUND / TARGET_LOST /
+                        #   FAILED / CANCELLED。⚠️ 网关会校验；写 control-tier 的
+                        #   FINISHED 会被拒 —— 那等于用任务的词汇表撒谎
+string message          # 人类可读说明（中文）**它会说清是"没有"还是"不知道"**
+float64 elapsed         # 耗时（秒，单调钟）
+float64 score           # TARGET_FOUND 时：得分最高的那个的置信度；否则 0
+float64 side            # TARGET_FOUND 时：−1 最左 … +1 最右（**画面内，不含距离**）；否则 0
+float64 image_quality   # 本次判定时画面的清晰度（**供人判断"这个'没有'有多可信"**）

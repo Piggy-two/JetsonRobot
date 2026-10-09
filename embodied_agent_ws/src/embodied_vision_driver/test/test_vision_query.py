@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """钉住视觉查询的判定 —— 尤其是那条**不对称规则**：
-**"找到了"可信；"没找到"只有在画面质量达标时才可信；其余一律是「不知道」。**
+**"找到了"可信；"没找到"只有在**一段窗口**都达标时才可信；其余一律是「不知道」。**
 """
 
 import pytest
@@ -17,12 +17,20 @@ class Det:
 
 
 def call(**kw):
-    """把必填参数填上默认值，测试只写它关心的那几个。"""
+    """把必填参数填上默认值，测试只写它关心的那几个。
+
+    默认窗口：10 帧、都清楚、**什么都没看到**（一个"底气十足的否定"）。
+    """
     base = dict(model_ready=True, label_known=True, frame_age_s=0.05,
-                frame_max_age_s=0.5, image_quality=500.0, quality_min=100.0,
-                best=None, label='person')
+                frame_max_age_s=0.5, label='person', known_hint='',
+                quality_min=100.0, min_frames=3,
+                window=vq.Window(frames=10, best=None, quality_min=500.0))
     base.update(kw)
     return vq.decide(**base)
+
+
+def window(best=None, frames=10, quality_min=500.0):
+    return vq.Window(frames=frames, best=best, quality_min=quality_min)
 
 
 # ==========================================================================
@@ -32,29 +40,67 @@ def call(**kw):
 def test_found_is_trusted_even_when_the_image_is_blurry():
     """★ 正面证据不因为画面差而作废 —— 宁可把糊画面里的误检当成"可能有"，
     也不要因为在糊画面上就把它丢掉（漏掉一个真的比多看一眼更贵）。"""
-    d = call(best=Det('person', 0.8), image_quality=5.0)
+    d = call(window=window(best=Det('person', 0.8), quality_min=5.0))
     assert (d.valid, d.found) == (True, True)
 
 
-def test_not_found_on_a_blurry_image_is_NOT_an_answer():
+def test_a_single_sighting_wins_over_a_window_full_of_misses():
+    """★★ **同一幅静止画面里，模型是时有时无的。**
+
+    实测（2026-10-09）：8 秒 152 帧，`suitcase` 只出现在 **68%** 的帧
+    （每帧检出数 0~3）。⇒ 判定必须看**窗口**：只要窗口里**任何一帧**看到了，
+    就是看到了 —— 否则东西明明在眼前，却会三次里有一次被说成"没有"。
+    """
+    d = call(window=window(best=Det('person', 0.4), frames=20, quality_min=400.0))
+    assert (d.valid, d.found) == (True, True)
+    assert '看到' in d.detail
+
+
+def test_not_found_on_a_blurry_window_is_NOT_an_answer():
     """★★ 本模块存在的理由。
 
     "检测器什么都没有"与"画面里真没有东西"看起来一模一样 —— 把前者读成后者，
     上层会据此得出"这里没有目标"的结论。2026-10-09 就是这么栽的：
     相机失焦，所有检测都是 0 个，而当时没人觉得这有什么不对（DEV_NOTES 坑 43）。
     """
-    d = call(best=None, image_quality=38.0, quality_min=100.0)
+    d = call(window=window(best=None, frames=10, quality_min=38.0), quality_min=100.0)
     assert d.valid is False, '糊画面上的"没找到"必须是「不知道」'
     assert d.found is False
     assert '过糊' in d.detail and '不能因此说' in d.detail
     assert 'person' in d.detail
 
 
-def test_not_found_on_a_good_image_is_a_real_answer():
-    """反向对照：画面达标时说"没有"是**真结论**，不能被前面那条规则连累。"""
-    d = call(best=None, image_quality=800.0, quality_min=100.0)
+def test_a_window_with_one_blurry_frame_is_not_enough_to_deny():
+    """★ 否定用**窗口里最差的那一帧**说话：中间糊过一帧，"没有"就不够硬。
+
+    （这正是"清不清晰"与"有没有"之间的关系：糊的那一帧可能刚好漏掉了它。）
+    """
+    d = call(window=window(best=None, frames=10, quality_min=40.0), quality_min=100.0)
+    assert d.valid is False and '过糊' in d.detail
+
+
+def test_not_found_on_a_good_window_is_a_real_answer():
+    """反向对照：窗口达标时说"没有"是**真结论**，不能被前面那条规则连累。"""
+    d = call(window=window(best=None, frames=10, quality_min=800.0))
     assert (d.valid, d.found) == (True, False)
     assert '没有 person' in d.detail
+    assert '10 帧' in d.detail, '要说清这个"没有"是几帧的结论'
+
+
+def test_too_few_frames_is_unknown_not_a_denial():
+    """★ 窗口里帧太少 ⇒ 不知道。
+
+    一帧的"没找到"什么都证明不了 —— 它可能是模型刚好打了个盹，
+    也可能是画面刚好没刷新。**没有足够的观察，就不能下否定的结论。**
+    """
+    d = call(window=window(best=None, frames=1, quality_min=800.0), min_frames=3)
+    assert d.valid is False
+    assert '1 帧' in d.detail and '才够确认' in d.detail
+
+
+def test_the_frame_floor_is_not_off_by_one():
+    assert call(window=window(frames=3), min_frames=3).valid is True
+    assert call(window=window(frames=2), min_frames=3).valid is False
 
 
 # ==========================================================================
@@ -91,7 +137,7 @@ def test_a_stale_frame_is_unknown_even_if_we_think_we_saw_something():
 
     同理，停更时的"找到了"也不该当成此刻的答案 —— 这一问问的是**现在**。
     """
-    d = call(frame_age_s=3.0, frame_max_age_s=0.5, best=Det('person', 0.9))
+    d = call(frame_age_s=3.0, frame_max_age_s=0.5, window=window(best=Det('person', 0.9)))
     assert d.valid is False
     assert '陈旧' in d.detail
 
@@ -103,7 +149,7 @@ def test_the_age_limit_is_not_off_by_one():
 
 
 # ==========================================================================
-# 挑最好的那个
+# 挑最好的那个（窗口内）
 # ==========================================================================
 
 def test_pick_best_takes_the_highest_score():

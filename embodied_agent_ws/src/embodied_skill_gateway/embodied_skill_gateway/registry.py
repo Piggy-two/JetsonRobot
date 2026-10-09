@@ -249,6 +249,21 @@ class Registry:
         reg.check_against_control_skills_limits()
         return reg
 
+    def unknown_srv_types(self, known):
+        """哪些技能的 `srv_type` **不在** `known` 里。返回排好序的列表（空 = 都认识）。
+
+        ⚠️ 为什么要有这一问（2026-10-09 真事）：网关**只调用它认识的服务类型**
+        （`skill_gateway._SRV_TYPES` 那张表）。新技能只在注册表里加一条、
+        忘了往那张表里登记，**注册表看起来完全正常**：`~/list` 里 `available: true`，
+        准入检查也过 —— 一直到**真的有人调它**、且恰好派发到那一步，才报
+        `注册表声明了未知的 srv_type …`。
+
+        ⇒ 这种配置错误**必须在启动时就炸**，而不是等某一条任务替它炸
+        （与本项目对规则表的态度一致：写错要炸，不要让它表现成"这个技能不好使"）。
+        """
+        return sorted({s.srv_type for s in self._specs.values()
+                       if s.srv_type not in known})
+
     def get(self, name):
         return self._specs.get(name)
 

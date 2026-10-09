@@ -62,8 +62,9 @@ from std_srvs.srv import Trigger
 
 from embodied_skills_interfaces.msg import SkillEvent
 from embodied_skills_interfaces.srv import (
-    AdvanceUntilBlocked, MoveRelative, PathClear, Rotate, SectorMinRange,
-    SkillCancel, SkillInvoke, SkillList, SkillResult, TurnUntilClear)
+    AdvanceUntilBlocked, LookFor, MoveRelative, PathClear, Rotate,
+    SectorMinRange, SkillCancel, SkillInvoke, SkillList, SkillResult,
+    TurnUntilClear)
 
 from embodied_skill_gateway import checks, task_state
 from embodied_skill_gateway.registry import Registry
@@ -78,6 +79,7 @@ _SRV_TYPES = {
     'embodied_skills_interfaces/PathClear': PathClear,
     'embodied_skills_interfaces/AdvanceUntilBlocked': AdvanceUntilBlocked,
     'embodied_skills_interfaces/TurnUntilClear': TurnUntilClear,
+    'embodied_skills_interfaces/LookFor': LookFor,
     'std_srvs/Trigger': Trigger,
 }
 
@@ -124,6 +126,18 @@ class SkillGateway(Node):
         # 注册表加载失败**必须立刻炸**：一个技能名写错的网关比没有网关更糟，
         # 它会静默地拒绝一切，而看起来"在正常运行"。
         self.registry = Registry.from_yaml(reg_file)
+
+        # ⚠️ 注册表里每个 `srv_type` 都必须在 `_SRV_TYPES` 里**登记过** —— 不登记的话，
+        #    注册表 / `~/list` / 准入检查**全都正常**，一直到真的有人调它、
+        #    且恰好派发到那一步才报 `注册表声明了未知的 srv_type …`。
+        #    2026-10-09 加 `semantic.look_for` 时正是这么漏的（只在注册表加了条目）。
+        #    ⇒ 启动时就炸，别让某一条任务替配置错误买单。
+        unknown = self.registry.unknown_srv_types(_SRV_TYPES.keys())
+        if unknown:
+            raise RuntimeError(
+                f'注册表里有没登记过的 srv_type：{unknown} —— 往 skill_gateway.py 的 '
+                f'_SRV_TYPES 里加上它们（那是**显式映射**，刻意不做动态 import）。'
+                f'不修的话，调用这些技能会一路走到派发才失败')
 
         self.events = self.create_publisher(SkillEvent, g('event_topic'), 20)
 

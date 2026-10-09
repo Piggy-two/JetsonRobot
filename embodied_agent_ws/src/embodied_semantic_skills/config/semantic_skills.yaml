@@ -1,0 +1,12 @@
+semantic_skills:
+  ros__parameters:
+
+    # 问谁。默认是 Vision Driver 的查询服务。
+    # ⚠️ **本技能自己不碰相机、不碰模型** —— 它只调这一条。
+    #    于是"什么算可信"的规则**只有一处**（vision_query.py）；
+    #    在这里再判一次就会有两份规则，而两份规则迟早分家（D-034 的老教训）。
+    find_service: '/vision_driver/find_in_view'
+
+    # 调下游原语的上限（秒）。⚠️ 本地话题 + 纯计算，正常是毫秒级；
+    #    留 2 s 是给"节点刚起来还在发现服务"的余量。
+    sub_call_timeout: 2.0

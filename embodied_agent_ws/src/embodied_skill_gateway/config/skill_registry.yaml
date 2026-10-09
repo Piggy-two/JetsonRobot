@@ -158,3 +158,34 @@ skills:
       #    `turn_plan.validate()` 里（有单测）。这是**已知的校验缝隙**，不是疏忽：
       #    上不了注册表的东西必须在下一层挡住，而不是"网关没管就没人管"。
       - {name: direction, type: float, unit: '', min: -1.0, max: 1.0}
+
+  # ---- Semantic Skill 层（task-tier）--------------------------------------
+  # ⚠️ 与上面两个 autonomous 技能**同层不同类**：那两个是**反应式运动**
+  #    （闭环、会动），这一个**只读、不动**（`causes_motion: false`）。
+  #    名字用 `semantic.` 前缀，一眼能看出"它回答的是语义问题，不是动作"。
+  semantic.look_for:
+    tier: task
+    description: 看一眼视野里有没有 <label>，并给出它在画面里的左右位置。**只读、不动**。
+    transport: service
+    target: /semantic_skills/look_for
+    srv_type: embodied_skills_interfaces/LookFor
+    # 图像在本地话题、判定是纯计算：正常毫秒级。留 20 s 是给"视觉那边刚起来、
+    # 模型还在加载"的余量 —— ⚠️ 那种情况下它会如实回 FAILED（不知道），
+    # 而不是干等或编一个"没有"。
+    timeout_s: 20.0
+    cancel_target: ''        # 🔒 只读查询，没有可取消的东西
+    # ★ 只读查询显式写 false —— 它不受 `allow_motion` 闸门约束，
+    #   也不需要人看护。**默认是 true**（漏写就少一道闸门），所以这个字段必须显式写。
+    causes_motion: false
+    allowed_principals:
+      - agent.planner        # ★ task-tier **应当**允许 Agent 调用（D-003 的那一层）
+      - operator.manual
+    params:
+      # ⚠️ 类别名是**模型类别表里的字符串**（如 person / bottle / cup）。
+      #    写错/不在表里不会静默变成"没找到" —— 技能会回 FAILED 并列出能查的名字
+      #    （D-046 决策 3：认不出就说不认识，不许永远说"没有"）。
+      #    网关这边只能查"非空"，"在不在表里"由下一层挡住。
+      - {name: label, type: string, unit: ''}
+      # ⚠️ "多少分算数"由**调用方**定：nano 模型在杂物场景常给 0.2~0.4，
+      #    这是一个策略问题，不是一个可以替人拍板的常数。
+      - {name: min_score, type: float, unit: '', min: 0.0, max: 1.0}

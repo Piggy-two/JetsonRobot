@@ -18,6 +18,15 @@
 把「我不知道」说成「没有」，上层就会据此得出"这里安全 / 没有目标"的结论 ——
 这正是本项目的铁律一直在防的（D-028：**不知道 ≠ 安全**）。
 
+⚠️ 而且是**一段窗口**，不是一帧（2026-10-09 实测补上的）
+--------------------------------------------------------
+同一幅**静止**画面、同一个模型：`suitcase` 只出现在 **68%** 的帧里
+（8 秒 152 帧，每帧检出数 0~3）。⇒ 拿**一帧**的"没找到"当结论，
+就会在东西明明在眼前时、**三次里有一次自信地说"没有"**。
+所以"确认没有"必须基于**最近一段窗口内每一个可用的帧**：
+任何一帧看到了 ⇒ 就是看到了；只有**窗口里每一帧都没看到、且每一帧都够清楚**
+才敢说"没有"，并且要说清是**几帧**的结论。
+
 ⚠️ 还有一条同族的：**类别名不在模型的类别表里，也必须是「不知道」**。
 问"杯子"而模型只认 `cup`，如果按"没找到"回答，它会**永远**说"没有杯子" ——
 一个永远不会报错的错答案。
@@ -27,6 +36,12 @@ from collections import namedtuple
 
 #: 一次查询的结论。`valid=False` 时 `found` 无意义（调用方**先看 valid**）。
 Decision = namedtuple('Decision', 'valid found detail')
+
+#: 用于判定的**一段窗口**（不是一帧）。
+#:   frames     —— 窗口里有几帧可用的
+#:   best       —— 窗口里得分最高的那个匹配检出（None = 一帧都没看到）
+#:   quality_min —— 窗口里**最低**的那一帧清晰度（否定结论用最差的那帧说话）
+Window = namedtuple('Window', 'frames best quality_min')
 
 
 def side_of(cx, width):
@@ -67,15 +82,15 @@ def label_is_known(label, known_labels):
 
 
 def decide(*, model_ready, label_known, frame_age_s, frame_max_age_s,
-           image_quality, quality_min, best, label, known_hint=''):
+           window, quality_min, min_frames, label, known_hint=''):
     """把"能不能回答、怎么回答"收在**一处**。返回 `Decision`。
 
-    :param frame_age_s: 距最近一帧的秒数；**从没收到过帧**时为 None
-    :param best: `pick_best` 的结果（None = 没找到）
+    :param frame_age_s: 距**最新**一帧的秒数；从没收到过帧时为 None
+    :param window: `Window` —— 最近一段窗口的汇总（见上面的定义）
 
     ⚠️ 判定的**顺序**有意义：**"有没有资格回答"排在"答案是什么"前面**。
-       反过来写（先看 best、再补一句质量警告）也能跑，但那样**糊画面里的
-       "没找到"会先被当成答案说出来**，警告只是附注 —— 而附注没人读。
+       反过来写（先看结果、再补一句质量警告）也能跑，但那样**不可信的答案
+       会先被说出来**，警告只是附注 —— 而附注没人读。
     """
     if not model_ready:
         return Decision(False, False, '模型还没就绪（正在加载，或加载失败）—— 不知道')
@@ -96,21 +111,29 @@ def decide(*, model_ready, label_known, frame_age_s, frame_max_age_s,
             f'图像陈旧：{frame_age_s:.1f}s 没有新帧（上限 {frame_max_age_s:g}s）—— 不知道。'
             f'（画面停住时"没找到"不能算数：那是没在看的安静，不是没东西）')
 
-    if best is not None:
-        # ★ 正面证据不因为画面差而作废：宁可把糊画面里的误检当成"可能有"
+    if window.best is not None:
+        # ★ 正面证据不因为画面差而作废：**任何一帧**看到了就算看到
         return Decision(True, True,
-                        f'看到了 {label}（score={best.score:.2f}，'
-                        f'画面清晰度 {image_quality:.0f}）')
+                        f'看到了 {label}（score={window.best.score:.2f}，'
+                        f'最近 {window.frames} 帧里出现过）')
 
-    if image_quality < quality_min:
+    # ---- 到这里是"一帧都没看到"：够不够格说"没有"？ ----
+    if window.frames < min_frames:
+        return Decision(
+            False, False,
+            f'最近只拿到 {window.frames} 帧（要 ≥ {min_frames} 帧才够确认"没有"）'
+            f'—— 不知道，不是"没有"')
+
+    if window.quality_min < quality_min:
         # ★★ 本模块存在的理由
         return Decision(
             False, False,
-            f'画面过糊（清晰度 {image_quality:.0f} < {quality_min:g}）—— '
-            f'**不能因此说"没有 {label}"**：糊的画面会漏掉真东西。'
+            f'窗口里有画面过糊的帧（最低清晰度 {window.quality_min:.0f} < {quality_min:g}）'
+            f'—— **不能因此说"没有 {label}"**：糊的画面会漏掉真东西。'
             f'2026-10-09 的教训：相机失焦时所有检测都是 0 个，而它和'
             f'"真没东西"看起来一模一样（DEV_NOTES 坑 43）')
 
     return Decision(True, False,
-                    f'画面里没有 {label}（清晰度 {image_quality:.0f} ≥ {quality_min:g}，'
+                    f'最近 {window.frames} 帧里都没有 {label}'
+                    f'（最低清晰度 {window.quality_min:.0f} ≥ {quality_min:g}，'
                     f'这个"没有"是可信的）')

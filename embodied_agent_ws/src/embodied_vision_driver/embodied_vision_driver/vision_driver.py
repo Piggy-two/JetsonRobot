@@ -28,6 +28,7 @@
 "模型还没就绪"，而不是卡住不响应、或者假装没有。
 """
 
+import collections
 import threading
 import time
 
@@ -94,6 +95,12 @@ class VisionDriver(Node):
         #: 取 100 是保守的**下限**（判"糊"用），不是"好"的标准。
         self.declare_parameter('quality_min', 100.0)
         self.declare_parameter('frame_max_age', 0.5)
+        #: ★ 判定用的**窗口**（秒）。否定结论必须基于一段窗口，不能基于一帧 ——
+        #:   实测（2026-10-09）：**同一幅静止画面**里 `suitcase` 只出现在 **68%** 的帧，
+        #:   拿一帧的"没找到"当结论 ⇒ 东西明明在眼前却**三次里有一次说"没有"**。
+        self.declare_parameter('confirm_window', 0.5)
+        #: 窗口里至少要有几帧才够确认"没有"。太少 ⇒ 不知道（不是"没有"）。
+        self.declare_parameter('min_frames', 3)
         self.declare_parameter('detections_topic', '/embodied/vision/detections')
         self.declare_parameter('diag_topic', '/embodied/vision/diag')
 
@@ -107,6 +114,8 @@ class VisionDriver(Node):
         self._load_error = ''
         self._infer_rate = 0.0
         self._last_result = None      # (detections, quality, 收到该帧的时刻)
+        #: 最近一段时间的推理结果 (t, detections, quality) —— 服务判定要用**窗口**
+        self._history = collections.deque(maxlen=200)
         self._warned_encoding = False
 
         self.pub = self.create_publisher(VisionDetections, g('detections_topic'), 10)
@@ -200,6 +209,10 @@ class VisionDriver(Node):
             last_t = now
             with self._lock:
                 self._last_result = (dets, quality, at, now)
+                self._history.append((now, dets, quality))
+                cutoff = now - float(self.get_parameter('confirm_window').value) - 1.0
+                while self._history and self._history[0][0] < cutoff:
+                    self._history.popleft()
             self._publish(dets, quality)
 
     def _publish(self, dets, quality):
@@ -228,11 +241,21 @@ class VisionDriver(Node):
     # ---------- 查询 ----------
 
     def _on_find(self, req, res):
+        now = time.monotonic()
         with self._lock:
-            result = self._last_result
-            age = None if self._image_at is None else time.monotonic() - self._image_at
-        dets = result[0] if result else []
-        quality = float(result[1]) if result else -1.0
+            age = None if self._image_at is None else now - self._image_at
+            # ★ 窗口 = 最近 `confirm_window` 秒里**每一次推理的结果**（不是某一帧）
+            span = float(self.get_parameter('confirm_window').value)
+            recent = [h for h in self._history if now - h[0] <= span]
+        best, qmin = None, None
+        for _t, dets_i, q_i in recent:
+            b = vq.pick_best(dets_i, req.label, req.min_score)
+            if b is not None and (best is None or b.score > best.score):
+                best = b
+            qmin = q_i if qmin is None else min(qmin, q_i)
+        window = vq.Window(frames=len(recent), best=best,
+                           quality_min=-1.0 if qmin is None else float(qmin))
+        quality = float(qmin) if qmin is not None else -1.0
 
         known = list(self._model.names.values()) if self._ready else []
         hint = ('能查的是：' + ', '.join(known[:12]) + ' …') if known else ''
@@ -243,20 +266,20 @@ class VisionDriver(Node):
             res.image_quality = quality
             return res
 
-        best = vq.pick_best(dets, req.label, req.min_score)
         d = vq.decide(
             model_ready=self._ready,
             label_known=vq.label_is_known(req.label, known),
             frame_age_s=age,
             frame_max_age_s=float(self.get_parameter('frame_max_age').value),
-            image_quality=quality,
+            window=window,
             quality_min=float(self.get_parameter('quality_min').value),
-            best=best, label=req.label, known_hint=hint)
+            min_frames=int(self.get_parameter('min_frames').value),
+            label=req.label, known_hint=hint)
 
         res.valid, res.found, res.detail = d.valid, d.found, d.detail
         res.image_quality = quality
         if d.found:
-            b = best
+            b = window.best
             res.score = float(b.score)
             res.x1, res.y1, res.x2, res.y2 = int(b.x1), int(b.y1), int(b.x2), int(b.y2)
             res.side = float(b.side)
