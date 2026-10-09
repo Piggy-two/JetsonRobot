@@ -189,3 +189,43 @@ skills:
       # ⚠️ "多少分算数"由**调用方**定：nano 模型在杂物场景常给 0.2~0.4，
       #    这是一个策略问题，不是一个可以替人拍板的常数。
       - {name: min_score, type: float, unit: '', min: 0.0, max: 1.0}
+
+  # ⚠️ **与 `look_for` 同层同类**（只读、不动），差别只在"问的是整幅还是某一侧"。
+  #    之所以单列一条而不是给 `look_for` 加个可选参数：**"哪一侧"改变了
+  #    `TARGET_LOST` 的含义**（整幅没有 ↔ 那一侧没有）—— 一个名字担两种含义
+  #    正是本项目一贯拒绝的。分开之后，LLM 的菜单里两条各有各的说法。
+  semantic.look_on_side:
+    tier: task
+    # ⚠️ **词表必须写进 description**：LLM 的菜单（`llm_planner.skill_menu`）
+    #    是从这里投影出来的，而`public_view()` 只带参数**名字与类型**、带不了枚举。
+    #    不写的话模型很可能填'左边'/'左'，然后得到一个 FAILED ——
+    #    那不是它的错，是我们没告诉它。（同理：`label` 也必须说清是模型类别表里的词。）
+    description: 只看画面的**某一侧**有没有 <label>。**只读、不动**。
+      `side` **必填**，只认 'left' 或 'right' 两个词（写别的、或给空串，
+      都会如实回 FAILED —— **不会**当成"不限"）；画面左边 = 机体左边。
+      查"整幅有没有"用 semantic.look_for（**两处的 TARGET_LOST 含义不同**）。
+    transport: service
+    target: /semantic_skills/look_on_side
+    srv_type: embodied_skills_interfaces/LookOnSide
+    timeout_s: 20.0         # 与 look_for 同量级，理由同（视觉那边可能在加载模型）
+    cancel_target: ''       # 🔒 只读查询，没有可取消的东西
+    causes_motion: false    # ★ 必须显式写（默认 true，漏写就少一道闸门）
+    allowed_principals:
+      - agent.planner        # ★ task-tier **应当**允许 Agent 调用（D-003 的那一层）
+      - operator.manual
+    params:
+      - {name: label, type: string, unit: ''}
+      # ⚠️ **这个字段网关校验不了取值**：只认 'left' / 'right'，
+      #    而注册表只能查"是非空字符串" —— 写 `右边` / `Left` 都会放行。
+      #    所以精确约束落在 **下一层**（`vision_query.check_side`，有单测），
+      #    而且它以 **FAILED（不知道）**的形式回到上层，**不会**静默当成"不限"
+      #    ——那会让"只看左边"变成"整个画面都看"，而结果看起来完全正常。
+      #    与 `turn_until_clear` 的 `direction`（只认 ±1）是同一类**已知校验缝隙**：
+      #    上不了注册表的东西必须在下一层挡住，而不是"网关没管就没人管"。
+      # ⚠️ **空串也不等于"不限"，是"没问"**（2026-10-09 实测口径）：
+      #    经本网关 ⇒ 空串被**网关自己**拒（`REJECTED: 参数 side 是空字符串`）；
+      #    压根不给 ⇒ `缺少必填参数 ['side']`；**直接**调 `~/look_on_side` ⇒
+      #    被 `look_plan.check_asked_side` 挡下并回 FAILED。三条路都**不会**静默当成"不限"。
+      #    要整幅就调 `semantic.look_for`，那**是另一个问题**（两处 `TARGET_LOST` 含义不同）。
+      - {name: side, type: string, unit: ''}
+      - {name: min_score, type: float, unit: '', min: 0.0, max: 1.0}

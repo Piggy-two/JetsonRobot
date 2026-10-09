@@ -10,10 +10,10 @@ from embodied_vision_driver import vision_query as vq
 
 
 class Det:
-    """检出替身（真实消息是 `VisionDetection`，这里只要 `.label` / `.score`）。"""
+    """检出替身（真实消息是 `VisionDetection`，这里只带用得到的字段）。"""
 
-    def __init__(self, label, score):
-        self.label, self.score = label, score
+    def __init__(self, label, score, side=0.0):
+        self.label, self.score, self.side = label, score, side
 
 
 def call(**kw):
@@ -250,3 +250,148 @@ def test_few_frames_with_a_fine_picture_does_not_add_the_hint():
     """反向对照：画面是好的、只是帧少 —— 别乱加"先看相机"这种误导。"""
     d = call(window=window(best=None, frames=2, quality_min=800.0), min_frames=3)
     assert '先看相机' not in d.detail
+
+
+# ==========================================================================
+# ★★ 只看某一侧（`semantic.look_on_side` 的底）
+# ==========================================================================
+#
+# ⚠️ 这一节里最要紧的一条是最后一条：**写错 side 必须是"不知道"，不是"没有"**。
+#    因为"当成不限"恰好会得到一个**看起来完全正常**的答案（整个画面都看），
+#    而调用方以为自己问的是"左边"。
+
+def test_on_side_unlimited_accepts_everything():
+    """空 = 不限定 ⇒ 老的 `look_for` 行为一点不变。"""
+    for v in (-1.0, -0.5, 0.0, 0.5, 1.0):
+        assert vq.on_side(v, '')
+
+
+@pytest.mark.parametrize('value,want,expected', [
+    (-1.0, 'left', True), (-0.5, 'left', True),
+    (0.0, 'left', False), (0.2, 'left', False), (1.0, 'left', False),
+    (1.0, 'right', True), (0.5, 'right', True),
+    (0.0, 'right', False), (-0.2, 'right', False), (-1.0, 'right', False),
+])
+def test_on_side(value, want, expected):
+    """画面三等分的外侧两段。⚠️ 中间那 1/3 两边都**不算** ——
+    这是有意的：没有一个"中间有多宽"的约定会被场地接受（与 D-028 同一条）。"""
+    assert vq.on_side(value, want) is expected
+
+
+def test_the_boundary_belongs_to_the_side():
+    """边界值（恰好 1/3）算**在内** —— "≥ 1/3"这种边界必须钉死，
+    否则"刚好在边上"这种帧会在两次调用之间摇摆（与 D-039 同族）。"""
+    assert vq.on_side(-vq.SIDE_THRESHOLD, 'left') is True
+    assert vq.on_side(vq.SIDE_THRESHOLD, 'right') is True
+    assert vq.on_side(vq.SIDE_THRESHOLD, 'left') is False
+
+
+def test_pick_best_on_a_side_only_considers_that_side():
+    """★ 最高分的那个在**另一侧**时，也不能被选中。
+    这是"只看左边"能成立的唯一依据 —— 否则它会拿右边的高分当真，
+    而返回的 `side` 与调用方问的那一侧自相矛盾。"""
+    dets = [Det('person', 0.9, side=0.8),      # 右边，分最高
+            Det('person', 0.4, side=-0.8)]     # 左边
+    assert vq.pick_best(dets, 'person', 0.1, 'left').score == 0.4
+    assert vq.pick_best(dets, 'person', 0.1, 'right').score == 0.9
+
+
+def test_pick_best_on_a_side_with_nothing_there_is_none():
+    """那一侧什么都没有 ⇒ None ⇒ 上层会说"那一侧没有"（这是**有依据**的否定，
+    前提是窗口/清晰度也达标 —— 见 `decide`）。"""
+    dets = [Det('person', 0.9, side=0.8)]
+    assert vq.pick_best(dets, 'person', 0.1, 'left') is None
+
+
+def test_the_middle_of_the_frame_belongs_to_neither_side():
+    """正中间：两边都查不到。⚠️ 这不是缺陷 —— 是**刻意不提供 `center`** 的后果，
+    调用方要"中间"就自己用 `side` 的绝对值判（那是调用方的策略）。"""
+    dets = [Det('person', 0.9, side=0.1)]
+    assert vq.pick_best(dets, 'person', 0.1, 'left') is None
+    assert vq.pick_best(dets, 'person', 0.1, 'right') is None
+    assert vq.pick_best(dets, 'person', 0.1).score == 0.9      # 不限 ⇒ 找得到
+
+
+@pytest.mark.parametrize('side', ['', 'left', 'right'])
+def test_check_side_accepts_the_three_legal_values(side):
+    assert vq.check_side(side) == ''
+
+
+@pytest.mark.parametrize('side', ['Left', 'LEFT', 'left ', 'middle', 'center',
+                                  '左边', 'both', 'up'])
+def test_check_side_rejects_anything_else(side):
+    """★ **必须报错，不能当成"不限"**。
+
+    当成"不限"的话，"只看左边"会静默地变成"整个画面都看" ——
+    而结果**看起来完全正常**，没人会发现问的不是同一件事。
+    （大小写和尾空格也不放过：这个字符串是人手敲的，也是 LLM 写的。）
+    """
+    assert vq.check_side(side) != ''
+
+
+def test_a_bad_side_is_unknown_NOT_a_denial():
+    """★★ 本节存在的理由。
+
+    写错 side 时最省事的做法是"忽略它、照整幅答" —— 那会得到
+    "最近 10 帧里都没有 person"，读起来是"这儿没有人"，
+    而调用方问的是"**左边**有没有人"。
+    ⇒ 必须是 `valid=False`（不知道）⇒ 上层映射成 `FAILED`，**不是** `TARGET_LOST`。
+    """
+    d = call(want_side='middle')
+    assert d.valid is False
+    assert d.found is False
+    assert '不知道' in d.detail and '不是"没有"' in d.detail
+    assert 'middle' in d.detail          # 得把写错的那个值原样报出来
+
+
+def test_a_bad_side_is_caught_before_anything_else():
+    """它排在判定链的最前面：**连"我有没有资格回答"这一步都过不去**，
+    所以后面的窗口/清晰度/帧数一概不影响结论（也就不会先说出一个答案、
+    再附注一句"其实这个答案不算数"）。"""
+    d = call(want_side='center',
+             window=window(best=Det('person', 0.9, side=0.9)))
+    assert d.valid is False           # 哪怕画面里**真的**看到了
+    assert d.found is False
+
+
+def test_a_good_side_says_which_half_in_words():
+    """人话里必须带上"哪半幅" —— 否则上层读到"最近 10 帧里都没有 person"
+    会以为问的是整幅画面。"""
+    d = call(want_side='left')
+    assert d.valid is True and d.found is False
+    assert '左半幅' in d.detail
+
+
+def test_a_side_sighting_says_which_half_in_words():
+    d = call(want_side='right', window=window(best=Det('person', 0.8, side=0.7)))
+    assert (d.valid, d.found) == (True, True)
+    assert '右半幅' in d.detail
+
+
+def test_without_a_side_nothing_is_said_about_halves():
+    """反向对照：不限时**不该**冒出"半幅"字样 —— 那会让人以为限定过。"""
+    assert '半幅' not in call().detail
+    assert '半幅' not in call(
+        window=window(best=Det('person', 0.8))).detail
+
+
+def test_a_blurry_picture_also_says_which_half():
+    """★★ 这条是**真机跑出来的**（2026-10-09，车在暗处、清晰度 0）。
+
+    当时问的是"左半幅"，回来的却是 ——
+    「窗口里有画面过糊的帧……**不能因此说"没有 person"**」，**没有一个字提到"左"**。
+    读的人（或 Agent）会以为在说整幅画面。
+    ⇒ 限定过的查询，**每一句**否定（哪怕是"我不敢说没有"这种）都要带限定。
+    """
+    d = call(want_side='left', window=window(best=None, quality_min=0.0),
+             quality_min=100.0)
+    assert d.valid is False
+    assert '左半幅' in d.detail
+
+
+def test_a_sub_threshold_sighting_also_says_which_half():
+    """同上：那句"看到了、只是低于门槛"也带着限定（它正是在说**那一侧**看到了）。"""
+    d = call(want_side='right', min_score=0.9,
+             window=window(best=None, quality_min=500.0,
+                           best_below=Det('person', 0.84, side=0.8)))
+    assert '右半幅' in d.detail

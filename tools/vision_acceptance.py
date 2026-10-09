@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""视觉链路的**端到端验收** —— 经网关派发 `semantic.look_for`，验它的**语义**。
+"""视觉链路的**端到端验收** —— 经网关派发 `semantic.look_for` / `look_on_side`，验它的**语义**。
 
     ⚠️ 这是【验收工装】。它**只读、不动车**：全程不发任何速度指令。
 
 为什么验的是"语义"而不是"准不准"
 ----------------------------------
 检测得准不准是**模型**的事，本工装管不着；**能不能信它给的结论**才是这条链的责任
-（D-046 / DEV_NOTES 坑 43/45/46）。所以四个相位分别钉住四句不同的话：
+（D-046 / DEV_NOTES 坑 43/45/46）。所以几个相位分别钉住几句不同的话：
 
     [1] 画面里真有的东西            → `TARGET_FOUND`
     [2] 同一个东西、门槛抬到够不着   → `TARGET_LOST`，**但 detail 必须说"看到了、只是低于门槛"**
     [3] 模型类别表里**没有**的类别   → **`FAILED`**（"不知道"），**绝不能是 `TARGET_LOST`**
     [4] 画面里确认没有的东西        → `TARGET_LOST`，且 detail 要说清依据（几帧 / 清晰度）
+    [5] 东西在**另一侧**时问这一侧   → `TARGET_LOST`，且 detail 必须点明"哪半幅"
+    [6] `side` 写成不认识的词        → **`FAILED`**（"不知道"），**绝不能是 `TARGET_LOST`**
 
 ⚠️ [2] 与 [3] 是两种**完全不同**的"没有"，把它们混起来是本项目花了一整天才分开的事：
     [2] 是"我看见了，但按你的标准不算数"（该做的是放宽门槛）；
     [3] 是"我根本不知道这是什么"（该做的是换个类别名）。
-    两者都报成"没有"的时候，Agen会得出"这里没有目标"并真的走开。
+    两者都报成"没有"的时候，Agent 会得出"这里没有目标"并真的走开。
+
+⚠️ [6] 要防的是**最隐蔽**的一种错：把不认识的 `side` **当成"不限"**。
+    那样得到的答案（"整幅里没有"）看起来完全正常，而调用方问的是"左半幅" ——
+    这跟 [3] 是同一族：**一个永远不会报错的错答案**。
+
+⚠️ [5] 有个前提：那个类别必须**只出现在一侧**。两侧都有实例时本工装**跳过它**
+    （⏭，不算通过也不算失败）—— 硬测会测出一个与 `side` 无关的结论。
 
 外加一条**结构不变量**：本链路的技能是 `causes_motion: false`，
 所以全程 `/cmd_vel` 与干跑话题上**非零帧数必须恒为 0**（"它永远不会命令运动"）。
@@ -31,6 +40,7 @@
 退出码：0 = 全部通过；1 = 有失败；4 = **拒测**（相机没出图 / 模型没就绪 / 网关不在）。
 """
 
+import json
 import sys
 import time
 
@@ -50,6 +60,7 @@ MOTOR_DRYRUN = '/embodied/motor/cmd_vel_dryrun'
 CMD_VEL = '/cmd_vel'
 
 SKILL = 'semantic.look_for'
+SKILL_SIDE = 'semantic.look_on_side'
 PRINCIPAL = 'agent.planner'
 
 #: 用哪几个类别名探"模型不认识" —— 挑 COCO 里**几乎不可能出现在室内**的，
@@ -57,6 +68,13 @@ PRINCIPAL = 'agent.planner'
 #: ⚠️ 换了模型这张表就不适用了 —— 那时 [3] 会失败并**说清**是为什么（见下）。
 FOREIGN_LABEL = '杯子'          # 中文名，通用 COCO 模型必然不认识
 ABSENT_LABEL = 'zebra'         # COCO 里的一类，室内画面里必然没有
+BAD_SIDE = 'middle'            # 不认识的 side 值（[6] 用）
+
+#: 挑用例时"离中线够远"的余量。
+#: ⚠️ 这**不是**规则的副本 —— 规则只有一处（`vision_query.SIDE_THRESHOLD` = 1/3）。
+#:    这里只要一个"这个目标稳稳落在某一侧"的判据，取 0.5 是**故意比规则更严**：
+#:    更严只会让本工装挑用例时更保守，**不会**让两份判据分家（D-034 的老教训）。
+SIDE_MARGIN = 0.5
 
 
 class Rig(Node):
@@ -66,6 +84,9 @@ class Rig(Node):
         super().__init__('vision_acceptance')
         self.diag = None
         self.labels = {}
+        #: 类别名 → 它**稳稳落在**哪几侧（{'left'} / {'right'} / {'left','right'}）。
+        #: 只收 |side| ≥ `SIDE_MARGIN` 的实例 —— 见那个常数的说明。
+        self.halves = {}
         self.nonzero_motion = 0
         self.motion_frames = 0
         self.create_subscription(Float64MultiArray, DIAG, self._on_diag, 10)
@@ -81,6 +102,13 @@ class Rig(Node):
     def _on_dets(self, m):
         for o in m.objects:
             self.labels[o.label] = max(self.labels.get(o.label, 0.0), float(o.score))
+            # ⚠️ "贴着中线"也要**记下来**（'near'）：一个 side=+0.35 的实例
+            #    在本工装的 0.5 余量下算"近中线"，但在**规则的 1/3** 下算**右侧**。
+            #    不记它，[5] 就可能挑到一个"其实也出现在别处"的类别，
+            #    然后因为一个与 `side` 无关的原因失败。
+            half = ('left' if o.side <= -SIDE_MARGIN
+                    else 'right' if o.side >= SIDE_MARGIN else 'near')
+            self.halves.setdefault(o.label, set()).add(half)
 
     def _on_twist(self, m):
         self.motion_frames += 1
@@ -94,11 +122,19 @@ class Rig(Node):
 
     # ---- 经网关问一次，并取终态 ----
 
-    def ask(self, label, min_score, timeout=25.0):
+    def ask(self, label, min_score, side='', timeout=25.0):
+        """经网关派发一次查询并等终态。
+
+        :param side: 非空 ⇒ 走 `semantic.look_on_side`（另一个技能）；
+                     空 ⇒ 走 `semantic.look_for`（整幅）。
+        """
+        args = {'label': label, 'min_score': float(min_score)}
+        if side:
+            args['side'] = side
         req = SkillInvoke.Request()
         req.principal = PRINCIPAL
-        req.skill = SKILL
-        req.args_json = ('{"label": "%s", "min_score": %r}' % (label, float(min_score)))
+        req.skill = SKILL_SIDE if side else SKILL
+        req.args_json = json.dumps(args, ensure_ascii=False)
         req.request_id = 'vision-acceptance'
         fut = self.invoke_cli.call_async(req)
         end = time.monotonic() + 10.0
@@ -126,10 +162,16 @@ def main():
     rclpy.init()
     rig = Rig()
     results = []
+    skipped = []
 
     def rep(name, ok, detail):
         results.append((name, ok, detail))
         print(f'  {"✅" if ok else "❌"} {name}：{detail}')
+
+    def skip(name, detail):
+        """**跳过 ≠ 通过**。用例构造不出来时说清楚，不当成绩。"""
+        skipped.append(name)
+        print(f'  ⏭ {name}：{detail}')
 
     try:
         print()
@@ -192,6 +234,31 @@ def main():
             st == 'TARGET_LOST' and '帧' in (msg or ''),
             f'{st}｜{msg}')
 
+        # ---- [5]：东西在另一侧时，问这一侧 ----
+        # ⚠️ 用例要求那个类别**只出现在一侧、且从不贴近中线**（见 `SIDE_MARGIN`）——
+        #    否则测出来的是一个与 `side` 无关的结论，宁可跳过。
+        halves = rig.halves.get(label, set())
+        if halves not in ({'left'}, {'right'}):
+            seen = '、'.join(sorted(halves)) or '（一帧都没记录到）'
+            skip('[5] 东西在**另一侧**时问这一侧 ⇒ TARGET_LOST',
+                 f'挑中的 {label!r} 出现过的位置是 {seen}，不是"只在一侧"'
+                 f'（本项要一个**只在一侧**的目标；把车对着单个东西再来）')
+        else:
+            here = next(iter(halves))
+            other = 'right' if here == 'left' else 'left'
+            st, js, msg = rig.ask(label, 0.0, side=other)
+            rep(f'[5] {label!r} 在{"左" if here == "left" else "右"}边，'
+                f'却问 **{other}** 边 ⇒ TARGET_LOST，且必须点明"哪半幅"',
+                st == 'TARGET_LOST' and '半幅' in (msg or ''),
+                f'{st}｜{msg}')
+
+        # ---- [6]：side 写成不认识的词 ----
+        st, js, msg = rig.ask(label, 0.0, side=BAD_SIDE)
+        rep(f'[6] side 写成不认识的 {BAD_SIDE!r} ⇒ **FAILED**（不知道），'
+            f'绝不能是 TARGET_LOST',
+            st == 'FAILED' and 'side' in (msg or '') and '不知道' in (msg or ''),
+            f'{st}｜{msg}')
+
         # ---- 结构不变量 ----
         rep('★ 全程**没有发出过任何速度指令**（该链路 causes_motion: false）',
             rig.nonzero_motion == 0,
@@ -206,6 +273,10 @@ def main():
                 print(f'     - {n}')
         else:
             print(f'  ✅ 全部 {len(results)} 项通过')
+        if skipped:
+            print(f'  ⏭ 另有 {len(skipped)} 项**跳过**（用例没能构造出来，**不算通过**）：')
+            for n in skipped:
+                print(f'     - {n}')
         print('  ⚠️ 它验的是"**能不能信这个结论**"，不是"模型认得准不准"')
         print('=' * 76)
         return 0 if not failed else 1

@@ -96,8 +96,21 @@ SYSTEM_PROMPT = """你是这台机器人的**任务规划模块**。
     `semantic.look_for` 的 `side` 是**画面里的左右**（左 = 负），
     而 `turn_until_clear` 的 `direction` 是 **+1 = 逆时针 = 左转**。
     ⇒「朝着看到的那一边转」要写 **`opposite_sign`**；写 `sign` 会**转向相反的一侧**。
-  ⚠️ 字段名要写**上一技能结果里真有的**（`look_for` 给的是
-    `success/state/message/elapsed/score/side/image_quality`）；写错会被拒并列出实际字段。
+  ⚠️ 字段名要写**上一技能结果里真有的**；写错会被拒并列出实际字段。
+    `semantic.look_for` 给的是
+      `success/state/message/elapsed/score/side/image_quality`
+    `semantic.look_on_side` 给的是
+      `success/state/message/elapsed/score/position/image_quality`
+    ⚠️ 两个技能的"左右"字段**名字不一样**，这不是笔误：
+      `look_for` 的 `side` 是**画面位置**（−1 最左 … +1 最右，数）；
+      `look_on_side` 的 `position` 是同一个含义，但它的 `side` 是**参数**
+      （"问哪一侧"，词）。**别弄混**：从 `look_on_side` 接位置要写 `position`。
+
+- **问"哪一侧"有专用的技能**：`semantic.look_on_side`（`args: {label, side, min_score}`）——
+  `side` 只认 `'left'` / `'right'`。它回答的**也是终态**
+  （那一侧有 = `TARGET_FOUND`／那一侧确认没有 = `TARGET_LOST`），
+  所以可以直接接条件。用户说「**左边有没有人**」「看看右边有没有东西」时用它，
+  不要用 `look_for` 再自己比较数值 —— **你没有比较数值的能力**（只能对终态做反应）。
 
 例（条件 + 绑定一起用）：「看看人在哪边，看到就往那边转」：
   {"steps": [
@@ -106,6 +119,10 @@ SYSTEM_PROMPT = """你是这台机器人的**任务规划模块**。
      "args": {"max_angle": 1.57, "clear_range": 0.5, "step_angle": 0.5,
               "direction": {"from": "prev", "field": "side", "as": "opposite_sign"}},
      "when": {"prev": "TARGET_FOUND"}}]}
+
+例（问某一侧）：「**左边**有没有人？」
+  {"steps": [{"skill": "semantic.look_on_side",
+              "args": {"label": "person", "side": "left", "min_score": 0.3}}]}
 
 只输出**一个 JSON 对象**，不要解释、不要 Markdown 代码块：
   计划：{"steps": [{"skill": "<技能名>", "args": {<参数名>: <数值>}},

@@ -37,10 +37,11 @@ def generate_launch_description():
         ),
         LogInfo(msg=[
             '\n── Semantic Skill ──\n',
-            '  look_for：看一眼视野里有没有某个东西。\n',
+            '  look_for：看一眼视野里有没有某个东西（整幅）。\n',
+            '  look_on_side：只看画面的**某一侧**（side: left / right）。\n',
             '  🔒 看到了 = TARGET_FOUND｜**确认没有** = TARGET_LOST｜'
             '**不知道** = FAILED\n',
-            '     （画面糊 / 没帧 / 模型没就绪 / 类别不在表里 ⇒ 一律 FAILED，'
-            '绝不会被报成"没有"）\n',
+            '     （画面糊 / 没帧 / 模型没就绪 / 类别不在表里 / side 写错'
+            ' ⇒ 一律 FAILED，绝不会被报成"没有"）\n',
         ]),
     ])

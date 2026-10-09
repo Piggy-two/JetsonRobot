@@ -62,8 +62,8 @@ from std_srvs.srv import Trigger
 
 from embodied_skills_interfaces.msg import SkillEvent
 from embodied_skills_interfaces.srv import (
-    AdvanceUntilBlocked, LookFor, MoveRelative, PathClear, Rotate,
-    SectorMinRange, SkillCancel, SkillInvoke, SkillList, SkillResult,
+    AdvanceUntilBlocked, LookFor, LookOnSide, MoveRelative, PathClear,
+    Rotate, SectorMinRange, SkillCancel, SkillInvoke, SkillList, SkillResult,
     TurnUntilClear)
 
 from embodied_skill_gateway import checks, task_state
@@ -80,6 +80,7 @@ _SRV_TYPES = {
     'embodied_skills_interfaces/AdvanceUntilBlocked': AdvanceUntilBlocked,
     'embodied_skills_interfaces/TurnUntilClear': TurnUntilClear,
     'embodied_skills_interfaces/LookFor': LookFor,
+    'embodied_skills_interfaces/LookOnSide': LookOnSide,
     'std_srvs/Trigger': Trigger,
 }
 

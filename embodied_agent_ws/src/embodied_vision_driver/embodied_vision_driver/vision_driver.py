@@ -256,11 +256,11 @@ class VisionDriver(Node):
             recent = [h for h in self._history if now - h[0] <= span]
         best, qmin, below = None, None, None
         for _t, dets_i, q_i in recent:
-            b = vq.pick_best(dets_i, req.label, req.min_score)
+            b = vq.pick_best(dets_i, req.label, req.min_score, req.side)
             if b is not None and (best is None or b.score > best.score):
                 best = b
             # ⚠️ 同时记住"看到了但不够分"的那个：低于门槛也不能假装没看见
-            b_any = vq.pick_best(dets_i, req.label, 0.0)
+            b_any = vq.pick_best(dets_i, req.label, 0.0, req.side)
             if b_any is not None and b_any.score < req.min_score \
                     and (below is None or b_any.score > below.score):
                 below = b_any
@@ -288,7 +288,7 @@ class VisionDriver(Node):
             quality_min=float(self.get_parameter('quality_min').value),
             min_frames=int(self.get_parameter('min_frames').value),
             min_score=float(req.min_score),
-            label=req.label, known_hint=hint)
+            label=req.label, known_hint=hint, want_side=str(req.side))
 
         res.valid, res.found, res.detail = d.valid, d.found, d.detail
         res.image_quality = quality

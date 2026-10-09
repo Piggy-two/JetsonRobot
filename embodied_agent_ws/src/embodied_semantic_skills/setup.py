@@ -20,7 +20,8 @@ setup(
     zip_safe=True,
     maintainer='Piggy-two',
     maintainer_email='piggy@example.com',
-    description='Semantic Skill（task-tier）：look_for —— 看一眼有没有某个东西',
+    description='Semantic Skill（task-tier）：look_for / look_on_side'
+                ' —— 看一眼有没有某个东西（整幅 / 某一侧）',
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={

@@ -37,6 +37,33 @@ from collections import namedtuple
 #: 一次查询的结论。`valid=False` 时 `found` 无意义（调用方**先看 valid**）。
 Decision = namedtuple('Decision', 'valid found detail')
 
+#: 可以用"哪一侧"来限定查询。**只有左右两边**。
+#: ⚠️ 不提供 `center`：那需要一个"中间有多宽"的约定，而**任何阈值都会被场地否决**
+#:   ——与 D-028 那条"避障阈值不能用固定距离"同一个道理。
+#:   要"在正中间"，用 `side` 的绝对值自己判（那是调用方的事，不是查询层的事）。
+SIDE_NAMES = ('left', 'right')
+
+#: `side` 落在哪一侧：**画面三等分**的外侧两段。`side` 是 −1(最左) … +1(最右)。
+#: ⚠️ **画面左边 = 机体左边** —— 这件事由 D-023 的相机朝向实机校验背书
+#:   （把物体放在车前方偏右，运动质心 513 次全在画面**右**侧、0 次在左）。
+SIDE_THRESHOLD = 1.0 / 3.0
+
+_SIDE_WORD = {'left': '左', 'right': '右'}
+
+
+def on_side(value, want):
+    """`side` 这个值算不算在 `want`（'left' / 'right'）那一侧。
+
+    `want` 为空 ⇒ 不限定，一律算"在"（那就是原来的行为）。
+    """
+    if not want:
+        return True
+    if want == 'left':
+        return value <= -SIDE_THRESHOLD
+    if want == 'right':
+        return value >= SIDE_THRESHOLD
+    return False
+
 #: 用于判定的**一段窗口**（不是一帧）。
 #:   frames     —— 窗口里有几帧可用的
 #:   best       —— 窗口里得分最高的那个匹配检出（None = 一帧都没看到）
@@ -60,13 +87,14 @@ def side_of(cx, width):
     return max(-1.0, min(1.0, 2.0 * (cx / float(width)) - 1.0))
 
 
-def pick_best(detections, label, min_score):
+def pick_best(detections, label, min_score, want_side=''):
     """在检出里挑出 `label` 的**最高分**那个；没有达标的返回 None。
 
     :param detections: 元素需有 `.label` / `.score` 的对象（ROS 消息或测试替身都行）
     :param min_score: 低于它**不算数**。⚠️ 这个阈值由**调用方**给 ——
                       nano 模型在杂物场景常给 0.2~0.4，"多少算数"是**策略**问题，
                       不是一个可以替调用方拍板的常数。
+    :param want_side: 只看画面某一侧（`''` = 不限）。见 `on_side`。
     """
     want = str(label).strip().lower()
     best = None
@@ -74,6 +102,8 @@ def pick_best(detections, label, min_score):
         if str(d.label).strip().lower() != want:
             continue
         if d.score < min_score:
+            continue
+        if not on_side(getattr(d, 'side', 0.0), want_side):
             continue
         if best is None or d.score > best.score:
             best = d
@@ -86,8 +116,23 @@ def label_is_known(label, known_labels):
     return any(str(k).strip().lower() == want for k in (known_labels or []))
 
 
+def check_side(side):
+    """校验"哪一侧"这个参数。返回错误说明（`''` = 合法）。
+
+    ⚠️ 不认识的写法（比如 `右边` / `LEFT ` 之外的东西）**必须报错**，
+    不能当成"不限" —— 那会让"只看左边"变成"整个画面都看"，而结果看起来完全正常。
+    """
+    if not side:
+        return ''
+    if side not in SIDE_NAMES:
+        return (f'不认识的 side：{side!r}（只认 {list(SIDE_NAMES)}）；'
+                f'当成"不限"会让"只看左边"静默地变成"整个画面都看"')
+    return ''
+
+
 def decide(*, model_ready, label_known, frame_age_s, frame_max_age_s,
-           window, quality_min, min_frames, min_score, label, known_hint=''):
+           window, quality_min, min_frames, min_score, label, known_hint='',
+           want_side=''):
     """把"能不能回答、怎么回答"收在**一处**。返回 `Decision`。
 
     :param frame_age_s: 距**最新**一帧的秒数；从没收到过帧时为 None
@@ -99,6 +144,10 @@ def decide(*, model_ready, label_known, frame_age_s, frame_max_age_s,
     """
     if not model_ready:
         return Decision(False, False, '模型还没就绪（正在加载，或加载失败）—— 不知道')
+
+    bad_side = check_side(want_side)
+    if bad_side:
+        return Decision(False, False, f'{bad_side} —— 不知道（不是"没有"）')
 
     if not label_known:
         # ★ 同族的坑：问一个模型不认识的类别，按"没找到"回答会**永远**说"没有"
@@ -116,10 +165,12 @@ def decide(*, model_ready, label_known, frame_age_s, frame_max_age_s,
             f'图像陈旧：{frame_age_s:.1f}s 没有新帧（上限 {frame_max_age_s:g}s）—— 不知道。'
             f'（画面停住时"没找到"不能算数：那是没在看的安静，不是没东西）')
 
+    where = f'（{_SIDE_WORD.get(want_side, want_side)}半幅）' if want_side else ''
+
     if window.best is not None:
         # ★ 正面证据不因为画面差而作废：**任何一帧**看到了就算看到
         return Decision(True, True,
-                        f'看到了 {label}（score={window.best.score:.2f}，'
+                        f'看到了 {label}{where}（score={window.best.score:.2f}，'
                         f'最近 {window.frames} 帧里出现过）')
 
     # ---- 到这里是"一帧都没看到"：够不够格说"没有"？ ----
@@ -144,7 +195,7 @@ def decide(*, model_ready, label_known, frame_age_s, frame_max_age_s,
         b = window.best_below
         return Decision(
             True, False,
-            f'**看到了 {label}（score={b.score:.2f}），但低于你要的 {min_score:g}** —— '
+            f'**看到了 {label}{where}（score={b.score:.2f}），但低于你要的 {min_score:g}** —— '
             f'按你的标准算"没有"，但画面里确实有它（要么放宽门槛，要么换个判断办法）')
 
     if window.quality_min < quality_min:
@@ -152,11 +203,11 @@ def decide(*, model_ready, label_known, frame_age_s, frame_max_age_s,
         return Decision(
             False, False,
             f'窗口里有画面过糊的帧（最低清晰度 {window.quality_min:.0f} < {quality_min:g}）'
-            f'—— **不能因此说"没有 {label}"**：糊的画面会漏掉真东西。'
+            f'—— **不能因此说"没有 {label}{where}"**：糊的画面会漏掉真东西。'
             f'2026-10-09 的教训：相机失焦时所有检测都是 0 个，而它和'
             f'"真没东西"看起来一模一样（DEV_NOTES 坑 43）')
 
     return Decision(True, False,
-                    f'最近 {window.frames} 帧里都没有 {label}'
+                    f'最近 {window.frames} 帧里都没有 {label}{where}'
                     f'（最低清晰度 {window.quality_min:.0f} ≥ {quality_min:g}，'
                     f'这个"没有"是可信的）')

@@ -24,6 +24,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/TurnUntilClear.srv"
   "srv/FindInView.srv"
   "srv/LookFor.srv"
+  "srv/LookOnSide.srv"
   "msg/SkillEvent.msg"
   "msg/VisionDetection.msg"
   "msg/VisionDetections.msg"

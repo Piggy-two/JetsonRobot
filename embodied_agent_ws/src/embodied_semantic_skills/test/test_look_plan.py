@@ -81,3 +81,30 @@ def test_bounded_score_survives_junk():
     """拿不到数就当 0 —— 一个"没找到"不该因为一个畸形字段而变成崩溃。"""
     assert look_plan.bounded_score(None) == 0.0
     assert look_plan.bounded_score('nonsense') == 0.0
+
+
+# ==========================================================================
+# ★ "问的是不是一句完整的话" —— 空 side 不是"不限"，是"没问"
+# ==========================================================================
+
+@pytest.mark.parametrize('side', ['left', 'right', ' left ', 'LEFT'])
+def test_a_named_side_passes(side):
+    """非空就算"问了一个侧" —— 值合不合法是**下一层**的事（`vision_query.check_side`），
+    这里只管"有没有问"，不复制一份词表（D-034）。"""
+    assert look_plan.check_asked_side(side) == ''
+
+
+@pytest.mark.parametrize('side', ['', '   ', None])
+def test_an_empty_side_is_a_missing_question(side):
+    """★★ 空值**不是**"不限"，是"没问"。
+
+    如果空值被当成"整幅"，调用方想问"**左半幅**有没有人"，
+    却会拿到一个**关于整个画面**的回答 —— 而且**两个结果都长得对**：
+    不会报错、不会崩、也不会有人发现（两处的 `TARGET_LOST` 含义本来就不同）。
+    这就是本项目反复遇到的那一族：**一个永远不会报错的错答案**。
+    ⇒ 要整幅就调 `semantic.look_for`。
+    """
+    why = look_plan.check_asked_side(side)
+    assert why != ''
+    assert '没给 side' in why
+    assert 'look_for' in why          # 拒绝必须**指出正确的做法**，否则读数的人只学会绕圈
