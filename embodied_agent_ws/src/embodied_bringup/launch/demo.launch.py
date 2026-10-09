@@ -46,15 +46,16 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
 
-def _include(pkg, filename, args):
+def _include(pkg, filename, args, condition=None):
     return IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory(pkg), 'launch', filename)),
-        launch_arguments=args.items())
+        launch_arguments=args.items(), condition=condition)
 
 
 def generate_launch_description():
@@ -97,6 +98,19 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'max_replans', default_value='2',
             description='重规划预算（D-044）。0 = 关掉（计划失败就此收手）'),
+        # ---- 感知那一路 ----
+        DeclareLaunchArgument(
+            'with_vision', default_value='true',
+            description='是否连**视觉**一起起（Vision Driver + Semantic Skill）。'
+                        '🔒 这一路**只读、不动**（`causes_motion: false`），'
+                        '所以默认开着 —— 演示要的就是"看得见"。'
+                        '关掉它（`false`）用于：不想占 GPU、或做与视觉无关的验收'),
+        DeclareLaunchArgument(
+            'vision_model_dir', default_value=(
+                '/home/ubuntu/ros2_ws/src/example/example/yolo_detect/models/26'),
+            description='视觉模型目录。⚠️ 默认从**厂商 SDK 借**通用模型（只读，不改厂商文件）'),
+        DeclareLaunchArgument('vision_model_file', default_value='yolo26n.engine',
+                              description='模型文件名（80 类通用 COCO）'),
     ]
 
     includes = [
@@ -125,6 +139,14 @@ def generate_launch_description():
             'llm_timeout': LaunchConfiguration('llm_timeout'),
             'max_replans': LaunchConfiguration('max_replans'),
         }),
+        # 感知那一路。⚠️ 排在最后：它**谁也不依赖**（相机在厂商栈里、
+        # 技能服务自己会重试发现），但让它最后起，日志读起来更像"一层一层搭上去"。
+        _include('embodied_vision_driver', 'vision_driver.launch.py', {
+            'model_dir': LaunchConfiguration('vision_model_dir'),
+            'model_file': LaunchConfiguration('vision_model_file'),
+        }, condition=IfCondition(LaunchConfiguration('with_vision'))),
+        _include('embodied_semantic_skills', 'semantic_skills.launch.py', {},
+                 condition=IfCondition(LaunchConfiguration('with_vision'))),
     ]
 
     # 把"这一栈现在什么姿态"打在启动日志里 —— 出问题时第一眼要能看见，
@@ -139,6 +161,8 @@ def generate_launch_description():
         '  规划那一跳 llm_enabled = ', LaunchConfiguration('llm_enabled'),
         '   规则表 rules_file = ', LaunchConfiguration('rules_file'),
         '（空 ⇒ 全走 LLM）\n',
+        '  感知 with_vision = ', LaunchConfiguration('with_vision'),
+        '   ← 只读、不动；关掉它就没有"看得见"的能力\n',
         '───────────────────────────────────────────────',
     ])
 

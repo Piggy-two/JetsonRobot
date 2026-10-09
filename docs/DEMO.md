@@ -11,12 +11,16 @@
 ## 1. 两条命令
 
 ```bash
-# ① 起栈（一条命令，七个节点；**不含厂商栈** —— 厂商栈要先在跑）
+# ① 起栈（一条命令，**九个**节点，含视觉那一路；**不含厂商栈** —— 厂商栈要先在跑）
 ros2 launch embodied_bringup demo.launch.py
 
 # ② 讲那段故事（另一个终端）
 python3 tools/demo_run.py --text "往前走被挡就绕开"
 ```
+
+⚠️ **视觉那一路默认开着**（`with_vision:=true`）：Vision Driver + Semantic Skill。
+🔒 它**只读、不动**（`causes_motion: false`），不受 `allow_motion` 闸门管。
+不想占 GPU、或做与视觉无关的验收时：`with_vision:=false`。
 
 **默认不开真动**：`dry_run=true`、`allow_motion=false` ⇒ 故事的每一步都照跑，
 **只有车不动**（命令停在 `/embodied/motor/cmd_vel_dryrun`）。
@@ -103,6 +107,38 @@ ros2 launch embodied_bringup demo.launch.py \
    不是又改了一次主意。判据用的是 **Agent 的唤醒计数**（每次**尝试**结束才 +1），
    不是"派发次数超过了计划的步数" —— 后者会把一个计划的内部步骤
    说成一次次改主意（第一版就是这么错的，见该脚本里的注释）。
+
+## 5.1 另一段故事：**"看一眼有没有人" —— 而且它自己会改主意**
+
+车前方大约 1 m 站个人，然后在另一个终端：
+
+```bash
+python3 /tmp/agent_vision_task.py "看看前面有没有人"   # 或直接 ros2 service call /agent_runtime/submit
+```
+
+真跑出来的原文（2026-10-09，**车上一句话、真模型、真相机**）：
+
+```text
+你说：看看前面有没有人
+规划 → semantic.look_for(label=person, min_score=0.5)          ← LLM 选的技能
+RUNNING
+TARGET_LOST  **看到了 person（score=0.40），但低于你要的 0.5** ——
+             按你的标准算"没有"，但画面里确实有它
+↻ 没有人再说话，Agent 自己换走法
+新计划 → semantic.look_for(label=person, **min_score=0.2**)
+TARGET_FOUND 看到了 person（score=0.47，最近 11 帧里出现过）→ 收尾
+```
+
+⚠️ **这一段的看点不是"它找到了人"，而是"它在被挡住之后改了自己的参数"** ——
+而且改的依据来自技能给的那句话（"要么放宽门槛"）。
+**如果技能当时说的是"最近 8 帧里都没有 person"，它多半会得出"这里没人"、
+跑去别处看** —— 一条**措辞**的差别，改掉了 Agent 的**决策**（`DEV_NOTES` 坑 46）。
+
+⚠️ **演示前要确认的两件事**（否则这一段会"什么都没检出"，而**不会报错**）：
+1. **镜头对焦**：手动镜头只有一个清晰距离。用 `tools/focus_assist.py` 对着
+   你要用的那个距离调（对着 1 m 站的人调，就别指望 40 cm 的东西是实的）。
+2. **类别挑它认得的**：`person` 最稳（实测 0.4~0.93）；`suitcase` 之类会飘
+   —— 而且它回答的是"**模型认为的 X**"，不是"你想的那个东西"。
 
 ## 6. 机器人在整个演示里从不被大模型直接控制
 

@@ -1,6 +1,6 @@
 # embodied_bringup — 一键拉起本项目的整栈
 
-> ⚠️ **它不是运行时组件，也不含任何安全逻辑。** 它唯一做的事是：把七个节点按
+> ⚠️ **它不是运行时组件，也不含任何安全逻辑。** 它唯一做的事是：把九个节点按
 > "能跑起来"的组合摆好，并把**当前的安全姿态打印在启动日志里**。
 > 真正决定安危的仍然是各节点自己的闸门默认值。
 
@@ -44,6 +44,7 @@ DEEPSEEK_API_KEY=... ros2 launch embodied_bringup demo.launch.py \
 | `allow_motion` | `false` | 三层闸门（D-033）。⚠️ 它**独立于** `dry_run`：两个都要开，车才可能动 |
 | `obstacle_guard` | `true` | 它是**安全功能**（D-036）。只在做验收时才关（守卫会拦住"正被命令前进"的验收本身） |
 | `llm_enabled` | `false` | 打开它意味着**用户的话会发往第三方** |
+| `with_vision` | `true` | 视觉那一路（Vision Driver + Semantic Skill）。🔒 它**只读、不动**（`causes_motion: false`），所以默认开着；不想占 GPU 或做与视觉无关的验收时关掉 |
 | `rules_file` | 空 | 与 D-038 一致：空表 ⇒ 一切都走 LLM 那一跳 |
 
 ## 一个已知的**起动窗口**（实测，约 3 秒）

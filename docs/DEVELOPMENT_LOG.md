@@ -70,6 +70,27 @@
      ⚠️ 值得一提的是**它失败得很体面**：没有挂死，而是超时后回
      `FAILED` +"视觉服务没有回话（超时）—— **不知道，不是"没有"**"。
 
+### 同日第三段：视觉**收进一键演示**，并亲眼看见一条措辞改动影响了 Agent 的决策
+
+`embodied_bringup/demo.launch.py` 现在把 **Vision Driver + Semantic Skill 也一起起来**
+（`with_vision:=true` 默认开；🔒 只读不动，不想占 GPU 时可关）—— **一条命令九个节点**，
+演示不必再另敲两条 `ros2 launch`。
+
+然后跑了一遍真机故事，结果比预期更好：
+
+```text
+你说：看看前面有没有人
+规划 → semantic.look_for(label=person, min_score=0.5)
+TARGET_LOST  **看到了 person（score=0.40），但低于你要的 0.5**
+↻ 没有人再说话，Agent 自己换走法
+新计划 → semantic.look_for(label=person, **min_score=0.2**)
+TARGET_FOUND → 收尾
+```
+
+★ **模型照着技能给的那句话改了自己的参数**（"要么放宽门槛" ⇒ 0.5 → 0.2）。
+⚠️ 这要是搁在修坑 46 之前 —— 技能会说"最近 8 帧里都没有 person" ——
+它多半会得出"这里没人"、跑去别处看。**一条措辞的差别，改掉了 Agent 的决策。**
+
 ### 同日补测：对焦确认在 1 m，`person` 这条链真机跑通
 
 用户把背包挪到 1 m 处并确认"感觉有 1 m 了"。**用两个独立的量测**（视觉不参与）：

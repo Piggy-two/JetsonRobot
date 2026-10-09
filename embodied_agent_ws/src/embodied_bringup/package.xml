@@ -18,6 +18,8 @@
   <exec_depend>embodied_motor_driver</exec_depend>
   <exec_depend>embodied_safety_runtime</exec_depend>
   <exec_depend>embodied_skill_gateway</exec_depend>
+  <exec_depend>embodied_vision_driver</exec_depend>
+  <exec_depend>embodied_semantic_skills</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>
