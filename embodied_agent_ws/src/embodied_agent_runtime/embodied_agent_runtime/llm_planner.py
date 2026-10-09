@@ -69,12 +69,28 @@ SYSTEM_PROMPT = """你是这台机器人的**任务规划模块**。
 判断原则：
 - **一步能做完就只给一步** —— 不要为了显得聪明而硬凑成多步。
 - 需要组合时，按**实际执行顺序**列出，参数按清单里给的单位与取值范围给。
-- 步骤之间**不要写条件、不要写「如果…就…」**：运行时就是按顺序执行，
-  某一步失败（FAILED/CANCELLED）会**自动中止**整条计划，其余终态则继续下一步。
+- 某一步失败（FAILED/CANCELLED）会**自动中止**整条计划，其余终态则继续下一步。
+- 步骤**可以带一个条件**（可选）：`"when": {"prev": "<终态>"}` ——
+  意思是「**只有上一步以这个终态结束，才执行我**」。不写 = 无条件执行。
+  ⚠️ **第 1 步不能带条件**（它前面没有上一步）。
+  ⚠️ `prev` 的取值**只有这六个**，写别的会被拒（而且写错的话那一步永远不会执行）：
+      「看到了/找到了」= `TARGET_FOUND`　「确认没有/没找到」= **`TARGET_LOST`**
+      「走完了/到位了」= `ARRIVED`　「前方受阻」= `BLOCKED`
+      「出故障」= `FAILED`　「被取消」= `CANCELLED`
+      ⚠️ **没有** `TARGET_NOT_FOUND` / `SUCCESS` 这种写法 —— 实测模型会自己编一个，
+        而编出来的条件**永远不成立**，那一步就永远不跑（所以校验会当场拒绝整条计划）。
+  ⚠️ **该带条件时必须带**：用户说「看看前面有没有人，**有**就往前走」，
+    正确写法是给第二步加条件：
+      {"steps": [
+        {"skill": "semantic.look_for", "args": {"label": "person", "min_score": 0.3}},
+        {"skill": "autonomous.advance_until_blocked",
+         "args": {...}, "when": {"prev": "TARGET_FOUND"}}]}
+    **不加条件就等于"无论有没有人都往前走"** —— 那不是用户要的。
 - 做不到 → **如实拒绝**并说明缺什么能力。宁可说"做不到"，也不要硬凑。
 
 只输出**一个 JSON 对象**，不要解释、不要 Markdown 代码块：
-  计划：{"steps": [{"skill": "<技能名>", "args": {<参数名>: <数值>}}, ...]}
+  计划：{"steps": [{"skill": "<技能名>", "args": {<参数名>: <数值>}},
+                  {"skill": "<技能名>", "args": {...}, "when": {"prev": "<终态>"}}]}
   拒绝：{"refuse": "<一句话理由>"}
 """
 
@@ -214,7 +230,13 @@ def _parse_reply(raw):
             args = st.get('args', {})
             if not isinstance(args, dict):
                 raise ReplyError(f'第 {i} 步的 args 必须是 object，是 {type(args).__name__}')
-            out.append({'skill': skill.strip(), 'args': args})
+            step = {'skill': skill.strip(), 'args': args}
+            # ⚠️ `when` 必须**原样带过去**：丢在这里的话，模型写的条件会
+            #    被静默忽略 —— 而"以为加了限制、其实没有"正是最危险的静默。
+            #    形状校验交给 `planner.check_when`（那边有说人话的拒绝理由）。
+            if 'when' in st:
+                step['when'] = st['when']
+            out.append(step)
         return 'steps', out
 
     if 'skill' in obj:                     # 旧的单步写法，仍然接受

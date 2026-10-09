@@ -463,3 +463,93 @@ def test_eviction_does_not_drop_an_attempt_awaiting_the_replan_decision():
     _submit(e, task_id='c', steps=[Step(ADV, {})])   # 满了
     assert e.get('a') is not None
     assert e.start_attempt('a', [Step(TURN, {})], 10.0, now=105.0) is not None
+
+
+# ==========================================================================
+# ★ ★ 带条件的步骤（D-047）：`when: {prev: <终态>}`
+# ==========================================================================
+
+def test_an_unconditional_step_still_runs_as_before():
+    """没有 when = 无条件 —— 老行为一字不变（这是加功能时最先要钉住的）。"""
+    e = _exec()
+    _submit(e, task_id='p', steps=[Step(ADV, {}), Step(TURN, {})])
+    out = e.on_event('p', ts.ARRIVED)
+    assert out.action == ex.DISPATCH_NEXT
+    assert out.step_index == 2
+
+
+def test_a_step_whose_condition_matches_gets_dispatched():
+    e = _exec()
+    _submit(e, task_id='p', steps=[Step(ADV, {}), Step(TURN, {}, {'prev': ts.ARRIVED})])
+    out = e.on_event('p', ts.ARRIVED)
+    assert out.action == ex.DISPATCH_NEXT
+    assert out.step_index == 2
+
+
+def test_a_step_whose_condition_does_not_match_is_SKIPPED_not_failed():
+    """★ 条件不满足 = **这一步不该跑**，不是失败。
+
+    ⚠️ 措辞上要分清：跳过说明"观察之下没有该做的事"，失败说明"出错了"。
+    两者都会让后面的步骤不跑，但**原因完全不同** —— 混起来的话，
+    排查的人会去查一个根本没发生的错误。
+    """
+    e = _exec()
+    _submit(e, task_id='p',
+            steps=[Step(ADV, {}), Step(TURN, {}, {'prev': ts.TARGET_FOUND})])
+    out = e.on_event('p', ts.BLOCKED)          # 上一步是"受阻"，条件要的是"找到了"
+    assert out.action == ex.PLAN_ENDED         # 后面没有可跑的步骤了 ⇒ 计划结束
+    assert out.terminal == ts.BLOCKED          # 终态 = **刚结束那一步**的观察
+    assert '不是' in out.reason and '失败' in out.reason
+
+
+def test_a_skip_lets_the_NEXT_eligible_step_run():
+    """★ 跳过的那一步不挡路：后面**条件满足**的步骤照跑。
+
+    这正是「看看有没有人 → 有人就往前走 → 无论有没有都停下来报告」
+    那种写法能成立的原因。
+    """
+    e = _exec()
+    _submit(e, task_id='p', steps=[
+        Step(ADV, {}),
+        Step(TURN, {}, {'prev': ts.TARGET_FOUND}),   # 不满足 ⇒ 跳过
+        Step(TURN, {}, {'prev': ts.BLOCKED}),        # 满足 ⇒ 跑它
+    ])
+    out = e.on_event('p', ts.BLOCKED)
+    assert out.action == ex.DISPATCH_NEXT
+    assert out.step_index == 3                 # 派发的是第 3 步
+    assert '跳过 1 步' in out.reason
+
+
+def test_a_skipped_step_does_not_change_what_later_conditions_compare_against():
+    """★ 后面几步的条件比的都是"**最后一次真正跑过**的那一步"的终态。
+
+    否则 `when: {prev: X}` 的含义会依赖"前面跳过过什么" —— 那种语义没人能一眼看懂。
+    """
+    e = _exec()
+    _submit(e, task_id='p', steps=[
+        Step(ADV, {}),
+        Step(TURN, {}, {'prev': ts.TARGET_FOUND}),   # 跳过（上一步是 BLOCKED）
+        Step(TURN, {}, {'prev': ts.ARRIVED}),        # 也跳过（比的仍是 BLOCKED）
+        Step(TURN, {}, {'prev': ts.BLOCKED}),        # 跑它
+    ])
+    out = e.on_event('p', ts.BLOCKED)
+    assert out.step_index == 4 and '跳过 2 步' in out.reason
+
+
+def test_the_plan_ends_with_the_state_that_decided_the_skips():
+    """★ 全部跳过时，计划终态 = **最后一次跑过的那一步**的终态。
+
+    理由：那是"没别的事可做"这个结论**依据的观察**。用例对得上 ——
+    「看看有没有人」报了 TARGET_LOST（没人）⇒ 后面"有人就往前走"被跳过 ⇒
+    整条计划就该以 TARGET_LOST 收尾，而不是含糊的"成功"。
+    """
+    e = _exec()
+    _submit(e, task_id='p', steps=[
+        Step(ADV, {}),
+        Step(TURN, {}, {'prev': ts.TARGET_FOUND}),
+        Step(TURN, {}, {'prev': ts.TARGET_FOUND}),
+    ])
+    out = e.on_event('p', ts.TARGET_LOST)
+    assert out.action == ex.PLAN_ENDED
+    assert out.terminal == ts.TARGET_LOST
+    assert e.get('p').ended_state == ts.TARGET_LOST

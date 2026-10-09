@@ -217,3 +217,99 @@ def test_rule_with_neither_skill_nor_steps_is_refused():
     r = planner.plan('脱困', {'脱困': {'nonsense': 1}}, _registry())
     assert r.accepted is False
     assert '既没有' in r.reason
+
+
+# ==========================================================================
+# ★ 步骤上的条件（D-047）：`when: {prev: <终态>}`
+# ==========================================================================
+
+def _plan(steps):
+    return planner.accept_plan(steps, _registry(), '测试')
+
+
+def test_a_condition_on_a_later_step_is_accepted():
+    r = _plan([{'skill': 'autonomous.advance_until_blocked',
+                'args': {'max_distance': 0.2, 'clear_range': 0.5, 'step': 0.1}},
+               {'skill': 'autonomous.turn_until_clear',
+                'args': {'max_angle': 1.0, 'clear_range': 0.5,
+                         'step_angle': 0.3, 'direction': 1.0},
+                'when': {'prev': 'TARGET_FOUND'}}])
+    assert r.accepted is True
+    assert r.steps[1].when == {'prev': 'TARGET_FOUND'}
+    assert r.steps[0].when is None
+
+
+def test_a_condition_on_the_FIRST_step_is_refused():
+    """★ 第 1 步前面没有上一步，条件无从判定 —— 必须**明确拒绝**。
+
+    如果放行（或者当没写），用户会以为加了限制，而实际什么都没发生。
+    """
+    r = _plan([{'skill': 'autonomous.advance_until_blocked',
+                'args': {'max_distance': 0.2, 'clear_range': 0.5, 'step': 0.1},
+                'when': {'prev': 'TARGET_FOUND'}}])
+    assert r.accepted is False
+    assert '第 1 步不能带 when' in r.reason
+
+
+def test_an_unknown_key_inside_when_is_refused():
+    """★ 写了 `if:` 之类 —— 用户以为加了限制，实际没有。必须报错。"""
+    r = _plan([{'skill': 'autonomous.advance_until_blocked',
+                'args': {'max_distance': 0.2, 'clear_range': 0.5, 'step': 0.1}},
+               {'skill': 'autonomous.turn_until_clear',
+                'args': {'max_angle': 1.0, 'clear_range': 0.5,
+                         'step_angle': 0.3, 'direction': 1.0},
+                'when': {'if': 'TARGET_FOUND'}}])
+    assert r.accepted is False
+    assert '不认识的键' in r.reason
+
+
+def test_an_unknown_state_inside_when_is_refused():
+    """★ 写了个不存在的状态名（比如 `SUCCESS`）⇒ 这一步**永远不会执行**，
+    而且不会报错 —— 所以必须在规划期就拒掉。"""
+    r = _plan([{'skill': 'autonomous.advance_until_blocked',
+                'args': {'max_distance': 0.2, 'clear_range': 0.5, 'step': 0.1}},
+               {'skill': 'autonomous.turn_until_clear',
+                'args': {'max_angle': 1.0, 'clear_range': 0.5,
+                         'step_angle': 0.3, 'direction': 1.0},
+                'when': {'prev': 'SUCCESS'}}])
+    assert r.accepted is False
+    assert '不是 task-tier 终态' in r.reason
+
+
+def test_a_non_dict_when_is_refused():
+    r = _plan([{'skill': 'autonomous.advance_until_blocked',
+                'args': {'max_distance': 0.2, 'clear_range': 0.5, 'step': 0.1}},
+               {'skill': 'autonomous.turn_until_clear',
+                'args': {'max_angle': 1.0, 'clear_range': 0.5,
+                         'step_angle': 0.3, 'direction': 1.0},
+                'when': 'TARGET_FOUND'}])
+    assert r.accepted is False
+    assert '必须是一个映射' in r.reason
+
+
+@pytest.mark.parametrize('state,expected', [
+    ('TARGET_FOUND', True), ('BLOCKED', False), (None, False), ('', False)])
+def test_when_ok(state, expected):
+    step = planner.Step('x', {}, {'prev': 'TARGET_FOUND'})
+    assert planner.when_ok(step, state) is expected
+
+
+def test_when_ok_without_a_condition_is_always_true():
+    assert planner.when_ok(planner.Step('x', {}), 'anything') is True
+
+
+def test_a_condition_only_difference_makes_it_a_DIFFERENT_plan():
+    """★ 这条与 D-044 的防死循环有关：两条只在**条件**上不同的计划是不同的走法。
+
+    把它们当成"同一条"会误挡一次真正的换路；反过来当成"不同"则受预算约束 ——
+    后者是安全的一侧。
+    """
+    a = [planner.Step('x', {}, None)]
+    b = [planner.Step('x', {}, {'prev': 'TARGET_FOUND'})]
+    assert planner.same_plan(a, b) is False
+
+
+def test_render_plan_shows_the_condition():
+    """★ 重规划时把"试过什么"给模型看 —— 条件不写出来，模型就不知道上次带没带。"""
+    text = planner.render_plan([planner.Step('x', {'a': 1}, {'prev': 'TARGET_FOUND'})])
+    assert '仅当上一步是 TARGET_FOUND' in text

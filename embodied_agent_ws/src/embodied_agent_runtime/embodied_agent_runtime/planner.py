@@ -37,13 +37,25 @@ Agent 不得触达 Control Skill。这条在别处只是文档；在这里它是
 from collections import namedtuple
 
 from embodied_skill_gateway import checks
+from embodied_skill_gateway import task_state as ts
 
 #: 规则表没命中。⚠️ 措辞里**不再**写"Phase 7 未实现" —— LLM 已经接上了，
 #: 现在"没命中"只说明规则表里没有这一条；能不能做由 LLM 那一跳回答（D-038）。
 REFUSE_NO_RULE = '规则表里没有匹配的条目'
 
 #: 一个步骤：技能名 + 参数。`args` 永远是 dict（哪怕是空的）。
-Step = namedtuple('Step', 'skill args')
+Step = namedtuple('Step', 'skill args when', defaults=(None,))
+#: 步骤上的**条件**（可省）。目前只支持一种：`when: {prev: <task-tier 终态>}`
+#: —— "**只有上一步以这个终态结束时，才执行我**"。
+#:
+#: ⚠️ 为什么条件只说"上一步的终态"，而不是一个更花哨的表达式语言：
+#:    · 它是**执行器手上唯一确凿的观察**（`last_step_state`）——
+#:      别的（画面里有什么、车在哪）都要去查别的东西，而"查什么、怎么查"本身
+#:      又是一层设计；
+#:    · 这一条就够表达"看看有没有人，**有**就往前走"这类话了，而那是今天
+#:      最缺的一句（规划层此前**明令禁止**写条件，见 `llm_planner.SYSTEM_PROMPT`）。
+#: ⚠️ 第 1 步**不许**带条件 —— 它前面没有东西，条件无从判定（在 `accept_plan` 里拒）。
+WHEN_KEY = 'prev'
 
 # 规划结果：是否接受、**步骤列表**、以及拒绝原因（人要看到的就是这句）。
 # ⚠️ 失败时 `steps` 为空 —— 部分计划没有意义（见 `accept_plan`）。
@@ -108,6 +120,49 @@ def accept_skill(skill, args, registry, source):
     return PlanResult(True, [Step(skill, args)], '')
 
 
+def when_ok(step, prev_state):
+    """这一步的**条件满不满足**。没有条件 = 满足。
+
+    ⚠️ 这是条件语义的**唯一**一处实现 —— `accept_plan` 校验形状、执行器判定取值，
+    两边都从这里读，免得"合法写法"与"实际判法"分家（那种分家的症状是
+    **配置通过校验却永远不执行**）。
+    """
+    cond = getattr(step, 'when', None)
+    if not cond:
+        return True
+    return cond.get(WHEN_KEY) == prev_state
+
+
+def check_when(raw, index, source):
+    """校验一步的 `when`。返回 `(when, 错误说明)`；没有条件时返回 `(None, '')`。
+
+    ⚠️ 三条都要**明确拒绝**而不是忽略，理由是它们都会**静默改变行为**：
+      · 第 1 步带条件 —— 它前面没有东西，条件永远无从判定；
+      · 不认识的键（比如写了 `if:` / `unless:`）—— 用户以为加了限制，实际没有；
+      · 不认识的状态名（比如写 `SUCCESS`）—— 条件永远不成立，那一步**永远不跑**。
+    """
+    if raw is None:
+        if index == 1:
+            return None, ''
+        return None, ''
+    if not isinstance(raw, dict):
+        return None, f'{source}第 {index} 步的 when 必须是一个映射，得到 {raw!r}'
+    if index == 1:
+        return None, (f'{source}第 1 步不能带 when —— 它前面没有上一步，'
+                      f'条件无从判定（要"无条件先做点什么"就把它放第 1 步）')
+    extra = sorted(k for k in raw if k != WHEN_KEY)
+    if extra:
+        return None, (f'{source}第 {index} 步的 when 里有不认识的键 {extra} —— '
+                      f'只支持 {WHEN_KEY!r}（"上一步的终态"）；'
+                      f'不认识的键必须报错，不能当没写')
+    want = raw.get(WHEN_KEY)
+    if want not in ts.TASK_TERMINAL:
+        return None, (f'{source}第 {index} 步的 when.{WHEN_KEY} 不是 task-tier 终态：'
+                      f'{want!r}（合法值：{list(ts.TASK_TERMINAL)}）—— '
+                      f'写错的话这一步**永远不会执行**，而且不会报错')
+    return {WHEN_KEY: want}, ''
+
+
 def accept_plan(steps, registry, source):
     """逐条校验一个计划的**每一步**。任何一步不合法 ⇒ **整条计划被拒**。
 
@@ -131,7 +186,11 @@ def accept_plan(steps, registry, source):
         if not r.accepted:
             # 把"是第几步"带上 —— 否则模型/规则表写错时看不出错在哪一步
             return PlanResult(False, [], f'{r.reason}　⟹　整条计划被拒（不做半条）')
-        out.append(r.steps[0])
+        when, why = check_when(raw.get('when'), i, source)
+        if why:
+            return PlanResult(False, [], f'{why}　⟹　整条计划被拒（不做半条）')
+        st = r.steps[0]
+        out.append(Step(st.skill, st.args, when))
     return PlanResult(True, out, '')
 
 
@@ -173,7 +232,9 @@ def plan_key(steps):
             args = tuple(sorted((str(k), repr(v)) for k, v in (s.args or {}).items()))
         except AttributeError:
             args = ()
-        out.append((getattr(s, 'skill', str(s)), args))
+        w = getattr(s, 'when', None)
+        cond = tuple(sorted((str(k), repr(v)) for k, v in w.items())) if w else ()
+        out.append((getattr(s, 'skill', str(s)), args, cond))
     return tuple(out)
 
 
@@ -204,7 +265,9 @@ def render_plan(steps):
         except AttributeError:
             items = []
         args = ', '.join(f'{k}={v!r}' for k, v in items)
-        out.append(f'{getattr(s, "skill", s)}({args})')
+        w = getattr(s, 'when', None)
+        tail = f' 〔仅当上一步是 {w[WHEN_KEY]}〕' if w else ''
+        out.append(f'{getattr(s, "skill", s)}({args}){tail}')
     return ' → '.join(out)
 
 

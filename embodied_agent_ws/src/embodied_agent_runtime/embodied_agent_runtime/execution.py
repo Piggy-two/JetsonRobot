@@ -45,6 +45,7 @@ D-004 要的是「Agent 发起 Skill 后进入 **WAIT**，由本地运行时执�
 import time
 from collections import namedtuple
 
+from embodied_agent_runtime import planner
 from embodied_skill_gateway import task_state as ts
 
 # 一次事件处理的结果
@@ -271,14 +272,51 @@ class Executor:
             return Outcome(PLAN_ENDED, plan_id, idx + 1, state,
                            f'第 {idx + 1}/{rec.total} 步报 {state} ⇒ 整条计划中止')
 
-        if idx + 1 < rec.total:
-            rec.current = idx + 1
-            return Outcome(DISPATCH_NEXT, plan_id, rec.current + 1, '',
-                           f'第 {idx + 1}/{rec.total} 步报 {state} ⇒ 继续下一步')
+        # 最后一步报终态 ⇒ 计划结束（**没有**"后续步骤"这回事，措辞要分开：
+        # 把它说成"后面的条件不满足"会让人去找一个根本不存在的条件）。
+        if idx + 1 >= rec.total:
+            self._end_attempt(rec, state)
+            return Outcome(PLAN_ENDED, plan_id, idx + 1, state,
+                           f'最后一步（第 {idx + 1}/{rec.total} 步）报 {state} ⇒ 计划结束')
+
+        # ★ 还有下一步 —— 但下一步**可能带着条件**（`when`）：只有"上一步的终态"
+        #   满足它，那一步才该跑。所以这里不是"派发 idx+1"，而是"派发**第一个
+        #   条件满足的**那一步"，中间的跳过去（跳过的**不算失败**，它只是不该跑）。
+        nxt = self._first_runnable(rec, idx + 1, state)
+        if nxt is not None:
+            skipped = nxt - (idx + 1)
+            rec.current = nxt
+            why = f'第 {idx + 1}/{rec.total} 步报 {state} ⇒ 继续下一步'
+            if skipped:
+                why += f'（跳过 {skipped} 步：条件不满足）'
+            return Outcome(DISPATCH_NEXT, plan_id, nxt + 1, '', why)
+
+        # 后面的步骤条件都不满足 ⇒ 计划到此结束。⚠️ 终态取**刚刚结束的那一步**的 ——
+        # 因为"没别的事可做了"这个结论，正是**基于这一次的观察**下的
+        # （比如"没看到人 ⇒ 那就没有必要往前走"）。
+        self._end_attempt(rec, state)
+        return Outcome(PLAN_ENDED, plan_id, idx + 1, state,
+                       f'第 {idx + 1}/{rec.total} 步报 {state} ⇒ '
+                       f'后续步骤的条件都不满足，计划到此结束'
+                       f'（**不是**失败：那些步骤本来就不该跑）')
 
         self._end_attempt(rec, state)
         return Outcome(PLAN_ENDED, plan_id, idx + 1, state,
                        f'最后一步（第 {idx + 1}/{rec.total} 步）报 {state} ⇒ 计划结束')
+
+    @staticmethod
+    def _first_runnable(rec, start, prev_state):
+        """从 `start` 起，第一个**条件满足**的步骤下标；没有则 None。
+
+        ⚠️ **所有候选步骤都拿同一个 `prev_state` 去比** —— 也就是"**最后一次
+        真正跑过的那一步**的终态"。跳过的那些步骤**不改变**它：
+        否则 `when: {prev: X}` 的含义会依赖"前面跳过过什么"，
+        而那种语义没人能一眼看懂。
+        """
+        for i in range(start, rec.total):
+            if planner.when_ok(rec.steps[i], prev_state):
+                return i
+        return None
 
     # ---------- 超时 ----------
 

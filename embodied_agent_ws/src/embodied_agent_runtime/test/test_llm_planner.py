@@ -469,3 +469,50 @@ def test_llm_multi_step_with_a_red_line_anywhere_is_rejected_whole():
     assert r.steps == []
     assert '第 2 步' in r.reason
     assert '架构红线' in r.reason
+
+
+# ==========================================================================
+# ★ 条件字段一路带到底（D-047）
+# ==========================================================================
+
+def test_the_parser_carries_when_through():
+    """★ 解析层**不许**把 `when` 丢掉。
+
+    丢在这里的话，模型写的条件会被静默忽略 —— 它以为加了限制、其实没有，
+    而计划照跑（"无论有没有人都往前走"）。这正是本项目最忌讳的静默行为。
+    """
+    kind, payload = parse_reply(
+        '{"steps": [{"skill": "autonomous.advance_until_blocked", "args": {}},'
+        ' {"skill": "autonomous.turn_until_clear", "args": {},'
+        '  "when": {"prev": "TARGET_FOUND"}}]}')
+    assert kind == 'steps'
+    assert payload[0].get('when') is None
+    assert payload[1]['when'] == {'prev': 'TARGET_FOUND'}
+
+
+def test_a_plan_with_a_condition_survives_the_whole_llm_path():
+    """★ 从"模型回包"到"被接受的计划"整条路：条件要还在，且格式与规则表那条路一致。"""
+    c = FakeClient('{"steps": ['
+                   '{"skill": "autonomous.advance_until_blocked",'
+                   ' "args": {"max_distance": 0.2, "clear_range": 0.5, "step": 0.1}},'
+                   '{"skill": "autonomous.turn_until_clear",'
+                   ' "args": {"max_angle": 1.0, "clear_range": 0.5,'
+                   '          "step_angle": 0.3, "direction": 1.0},'
+                   ' "when": {"prev": "BLOCKED"}}]}')
+    out = plan_task('往前走，被挡就左转', {}, _registry(), c)
+    assert out.result.accepted is True
+    assert out.result.steps[1].when == {'prev': 'BLOCKED'}
+
+
+def test_a_bad_condition_from_the_model_is_refused_with_a_reason():
+    """模型把状态名写错 ⇒ 整条计划被拒，且理由里说清是"什么"不对（不是含糊的"非法"）。"""
+    c = FakeClient('{"steps": ['
+                   '{"skill": "autonomous.advance_until_blocked",'
+                   ' "args": {"max_distance": 0.2, "clear_range": 0.5, "step": 0.1}},'
+                   '{"skill": "autonomous.turn_until_clear",'
+                   ' "args": {"max_angle": 1.0, "clear_range": 0.5,'
+                   '          "step_angle": 0.3, "direction": 1.0},'
+                   ' "when": {"prev": "SUCCESS"}}]}')
+    out = plan_task('往前走，被挡就左转', {}, _registry(), c)
+    assert out.result.accepted is False
+    assert '不是 task-tier 终态' in out.result.reason
