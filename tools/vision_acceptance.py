@@ -13,8 +13,18 @@
     [2] 同一个东西、门槛抬到够不着   → `TARGET_LOST`，**但 detail 必须说"看到了、只是低于门槛"**
     [3] 模型类别表里**没有**的类别   → **`FAILED`**（"不知道"），**绝不能是 `TARGET_LOST`**
     [4] 画面里确认没有的东西        → `TARGET_LOST`，且 detail 要说清依据（几帧 / 清晰度）
-    [5] 东西在**另一侧**时问这一侧   → `TARGET_LOST`，且 detail 必须点明"哪半幅"
+    [5a] 东西在**这一侧**、问**这一侧** → `TARGET_FOUND`          ← 正面格
+    [5b] 答复里的 `position` 与问的那一侧一致（−1…+1）              ← 位置没写反
+    [5c] 东西在**另一侧**时问这一侧   → `TARGET_LOST`，且 detail 必须点明"哪半幅"
     [6] `side` 写成不认识的词        → **`FAILED`**（"不知道"），**绝不能是 `TARGET_LOST`**
+
+🔴 **为什么 [5a] 是这一组里最要紧的一格**（2026-10-12 补）：本工装原先**只有** [5c] ——
+    一个 `look_on_side` 的用例**全部**断言 `TARGET_LOST` 或 `FAILED`。
+    也就是说：**一个"永远返回 `TARGET_LOST`"的实现，能把这套工装整套跑绿。**
+    那一格不是"没跑过"，是**工装里压根没有这条用例**。
+⇒ 正面格与反面格**必须成对**，且**同一个摆位一次测完**：
+    只测一半的话，"忽略 `side`、整幅搜索"和"左/右写反"都可能**不响**
+    （左/右写反属 `opposite_sign` 那一族，D-048 的教训）。
 
 ⚠️ [2] 与 [3] 是两种**完全不同**的"没有"，把它们混起来是本项目花了一整天才分开的事：
     [2] 是"我看见了，但按你的标准不算数"（该做的是放宽门槛）；
@@ -25,8 +35,8 @@
     那样得到的答案（"整幅里没有"）看起来完全正常，而调用方问的是"左半幅" ——
     这跟 [3] 是同一族：**一个永远不会报错的错答案**。
 
-⚠️ [5] 有个前提：那个类别必须**只出现在一侧**。两侧都有实例时本工装**跳过它**
-    （⏭，不算通过也不算失败）—— 硬测会测出一个与 `side` 无关的结论。
+⚠️ [5a]/[5b]/[5c] 有个共同前提：那个类别必须**只出现在一侧**。两侧都有实例时本工装
+    **三格一起跳过**（⏭，不算通过也不算失败）—— 硬测会测出一个与 `side` 无关的结论。
 
 外加一条**结构不变量**：本链路的技能是 `causes_motion: false`，
 所以全程 `/cmd_vel` 与干跑话题上**非零帧数必须恒为 0**（"它永远不会命令运动"）。
@@ -77,6 +87,21 @@ BAD_SIDE = 'middle'            # 不认识的 side 值（[6] 用）
 SIDE_MARGIN = 0.5
 
 
+def position_of(result_json):
+    """从网关的 `result_json` 里取 `look_on_side` 的 `position`（画面里的左右，−1…+1）。
+
+    ⚠️ 取不到就返回 `None` —— **绝不编一个数出来**（那会让 [5b] 凭空通过）。
+    ⚠️ 字段名不是猜的：2026-10-12 离线核过 —— `look_on_side` 的答复字段是
+    `position`（`look_for` 那条用的是 `side`，两个名字**含义不同**，别串用）。
+    """
+    try:
+        obj = json.loads(result_json or '{}')
+    except (TypeError, ValueError):
+        return None
+    v = obj.get('position') if isinstance(obj, dict) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
 class Rig(Node):
     """订阅服务端与**所有可能被命令运动的地方**，用来钉那条结构不变量。"""
 
@@ -104,7 +129,7 @@ class Rig(Node):
             self.labels[o.label] = max(self.labels.get(o.label, 0.0), float(o.score))
             # ⚠️ "贴着中线"也要**记下来**（'near'）：一个 side=+0.35 的实例
             #    在本工装的 0.5 余量下算"近中线"，但在**规则的 1/3** 下算**右侧**。
-            #    不记它，[5] 就可能挑到一个"其实也出现在别处"的类别，
+            #    不记它，[5a]/[5b]/[5c] 就可能挑到一个"其实也出现在别处"的类别，
             #    然后因为一个与 `side` 无关的原因失败。
             half = ('left' if o.side <= -SIDE_MARGIN
                     else 'right' if o.side >= SIDE_MARGIN else 'near')
@@ -234,21 +259,40 @@ def main():
             st == 'TARGET_LOST' and '帧' in (msg or ''),
             f'{st}｜{msg}')
 
-        # ---- [5]：东西在另一侧时，问这一侧 ----
+        # ---- [5a]/[5b]/[5c]：`side` 这一格，**正反成对**地测 ----
         # ⚠️ 用例要求那个类别**只出现在一侧、且从不贴近中线**（见 `SIDE_MARGIN`）——
-        #    否则测出来的是一个与 `side` 无关的结论，宁可跳过。
+        #    否则测出来的是一个与 `side` 无关的结论，宁可**三格一起跳过**。
+        # 🔴 三个一起跳是刻意的：只跑 [5a] 或只跑 [5c] 都会给出"看起来通过"的错结论。
         halves = rig.halves.get(label, set())
         if halves not in ({'left'}, {'right'}):
             seen = '、'.join(sorted(halves)) or '（一帧都没记录到）'
-            skip('[5] 东西在**另一侧**时问这一侧 ⇒ TARGET_LOST',
-                 f'挑中的 {label!r} 出现过的位置是 {seen}，不是"只在一侧"'
-                 f'（本项要一个**只在一侧**的目标；把车对着单个东西再来）')
+            why = (f'挑中的 {label!r} 出现过的位置是 {seen}，不是"只在一侧"'
+                   f'（本组要一个**只在一侧**的目标；把车对着单个东西再来）')
+            skip('[5a] 东西在这一侧、问**这一侧** ⇒ TARGET_FOUND', why)
+            skip('[5b] 答复里的 position 与问的那一侧一致', why)
+            skip('[5c] 东西在**另一侧**时问这一侧 ⇒ TARGET_LOST', why)
         else:
             here = next(iter(halves))
             other = 'right' if here == 'left' else 'left'
+            zh = '左' if here == 'left' else '右'
+
+            # [5a] **正面格** —— 缺了它，一个"永远返回 TARGET_LOST"的实现能整套通过
+            st, js, msg = rig.ask(label, 0.0, side=here)
+            rep(f'[5a] {label!r} 在{zh}边，问 **{here}** 边 ⇒ TARGET_FOUND',
+                st == 'TARGET_FOUND', f'{st}｜{msg}')
+
+            # [5b] 位置**符号**：问的是左边，答复里的 position 就必须是负的
+            #     （复用 [5a] 那次答复，不额外发一次请求）
+            pos = position_of(js)
+            rep(f'[5b] 答复里的 `position` 也要落在**{zh}**边（−1…+1），'
+                f'不能写反',
+                pos is not None and (pos < 0) == (here == 'left'),
+                f'position={pos!r}｜原始答复 {js!r}')
+
+            # [5c] **反面格**：同一摆位、立刻反向再问一次
             st, js, msg = rig.ask(label, 0.0, side=other)
-            rep(f'[5] {label!r} 在{"左" if here == "left" else "右"}边，'
-                f'却问 **{other}** 边 ⇒ TARGET_LOST，且必须点明"哪半幅"',
+            rep(f'[5c] {label!r} 在{zh}边，却问 **{other}** 边 ⇒ TARGET_LOST，'
+                f'且必须点明"哪半幅"',
                 st == 'TARGET_LOST' and '半幅' in (msg or ''),
                 f'{st}｜{msg}')
 
