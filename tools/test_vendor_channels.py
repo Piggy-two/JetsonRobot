@@ -313,4 +313,31 @@ def test_exit_codes_are_distinct_and_match_the_check_tool():
     assert vc.EXIT_CLEAN == 0
     assert vc.EXIT_SECOND_DRIVER == 1
     assert vc.EXIT_REFUSE == 4
-    assert vc.EXIT_VOID not in (vc.EXIT_CLEAN, vc.EXIT_SECOND_DRIVER, vc.EXIT_REFUSE)
+    # ⚠️ 0 / 1 / 4 是 `vendor_cmd_channel_check.py` 的口径，**不许漂**。
+    assert {vc.EXIT_CLEAN, vc.EXIT_SECOND_DRIVER, vc.EXIT_REFUSE} == {0, 1, 4}
+
+
+#: 会动车的工装**已经在用**的退出码。⚠️ 退出码是这几个程序**共用的命名空间** ——
+#: 本模块的任何一个码只要落进这里，两个不同的意思就会长得一模一样。
+#: 来源：2026-10-12 逐个 `grep` 出来的（`demo_run` 3 = submit 服务不可用、
+#: `safety_chain_suspended_acceptance` 2/3、`suspended_motion_acceptance` 2/3、
+#: `phase0_chassis_motion_acceptance` 2、`ground_motion_acceptance` 2、
+#: `agent_ground_acceptance` 4、`vendor_cmd_channel_check` 0/1/4）。
+_CODES_ALREADY_TAKEN_BY_RIGS = frozenset({0, 1, 2, 3, 4})
+
+
+def test_void_code_does_not_collide_with_any_rigs_own_exit_code():
+    """★ 这条是**从一次真实事故里长出来的**（2026-10-12）。
+
+    "结论作废"第一版取 3 —— 而 3 早已被三个工装用着表示"**依赖没起来**"，
+    含义**正好相反**。当场就撞上了：底盘锁存没解除，工装如实返回 3，
+    而那个 3 **看起来就像"结论被作废了"**。
+
+    ⇒ 本模块的码，除 0/1/4 那三个（与检查工装刻意的对齐）之外，
+    **一个都不许落在工装已用的集合里**。
+    """
+    assert vc.EXIT_VOID not in _CODES_ALREADY_TAKEN_BY_RIGS, (
+        f'EXIT_VOID={vc.EXIT_VOID} 与某个工装自己的退出码撞了 —— '
+        f'那会让"依赖没起来"和"结论作废"长得一模一样')
+    assert len({vc.EXIT_CLEAN, vc.EXIT_SECOND_DRIVER, vc.EXIT_REFUSE,
+                vc.EXIT_VOID}) == 4
