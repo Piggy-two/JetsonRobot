@@ -52,6 +52,35 @@ def test_missing_or_wrong_shaped_position_yields_none(raw):
 
 
 # --------------------------------------------------------------------------
+# pick_one_sided：给 [5a]/[5b]/[5c] 挑一个"只在一侧"的目标
+# --------------------------------------------------------------------------
+
+def test_picks_the_strongest_one_sided_label():
+    labels = {'chair': 0.60, 'suitcase': 0.55, 'person': 0.30}
+    halves = {'chair': {'near'}, 'suitcase': {'right'}, 'person': {'left'}}
+    # ⚠️ 不许因为 chair 分最高就挑它 —— 它是 near，挑它 = 永远跳过
+    assert va.pick_one_sided(labels, halves) == ('suitcase', 0.55)
+
+
+def test_ignores_labels_seen_on_both_sides_or_near_the_middle():
+    labels = {'a': 0.9, 'b': 0.8, 'c': 0.7}
+    halves = {'a': {'left', 'right'}, 'b': {'near'}, 'c': {'near', 'left'}}
+    assert va.pick_one_sided(labels, halves) is None
+
+
+def test_returns_none_rather_than_a_second_best():
+    """⚠️ 挑不到就 `None`（调用方**跳过**）—— 不许退而求其次拿一个"也在另一侧"的。"""
+    assert va.pick_one_sided({'a': 0.9}, {'a': {'left', 'right'}}) is None
+    assert va.pick_one_sided({}, {}) is None
+    assert va.pick_one_sided(None, None) is None
+
+
+def test_a_label_with_no_recorded_half_is_not_usable():
+    """漏了 half 记录的类别**不能**当成"只在一侧"（那正是"没看到≠没有"那条）。"""
+    assert va.pick_one_sided({'a': 0.9}, {}) is None
+
+
+# --------------------------------------------------------------------------
 # 结构性检查：`look_on_side` 的**正面格**必须还在
 # --------------------------------------------------------------------------
 

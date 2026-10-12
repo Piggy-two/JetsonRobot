@@ -35,8 +35,13 @@
     那样得到的答案（"整幅里没有"）看起来完全正常，而调用方问的是"左半幅" ——
     这跟 [3] 是同一族：**一个永远不会报错的错答案**。
 
-⚠️ [5a]/[5b]/[5c] 有个共同前提：那个类别必须**只出现在一侧**。两侧都有实例时本工装
+⚠️ [5a]/[5b]/[5c] 有个共同前提：那个类别必须**只出现在一侧**。挑不到这样的类别时本工装
     **三格一起跳过**（⏭，不算通过也不算失败）—— 硬测会测出一个与 `side` 无关的结论。
+⚠️ 这一组**自己挑目标**（`pick_one_sided`：在"只在一侧"的类别里挑分最高的），
+    **不沿用** [1]/[2] 那个"分最高"的 —— 两者要的不是同一件事。
+    共用的话，画面里只要有一个**更亮的、靠近中线的**物体，这三格就**永远跳过**，
+    而那看起来像"场景不满足"（2026-10-12 实测撞上：`chair` 0.60 近中线压住了
+    只在一侧的 `suitcase` 0.55）。
 
 外加一条**结构不变量**：本链路的技能是 `causes_motion: false`，
 所以全程 `/cmd_vel` 与干跑话题上**非零帧数必须恒为 0**（"它永远不会命令运动"）。
@@ -100,6 +105,22 @@ def position_of(result_json):
         return None
     v = obj.get('position') if isinstance(obj, dict) else None
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def pick_one_sided(labels, halves):
+    """从"画面里真的检出过"的类别里，挑一个**只出现在一侧**的（分最高的那个）。
+
+    ⚠️ 为什么不能沿用 [1]/[2] 挑的那个 `label`：两者要的**不是同一件事** ——
+    [1]/[2] 要"画面里真的有"（所以挑**分最高**的），而 [5a]/[5b]/[5c] 要"**只在一侧**"。
+    共用一个的话，画面里只要有一个**更亮的、靠近中线的**物体，
+    这三格就会**永远跳过** —— 而那看起来像"场景不满足"，其实是**选材规则**造成的。
+
+    ⚠️ 挑不到就返回 `None`；调用方**跳过**，**不许**退而求其次拿一个"也出现在另一侧"的
+    （那测出来的会是一个与 `side` 无关的结论）。
+    """
+    cands = [(l, s) for l, s in (labels or {}).items()
+             if (halves or {}).get(l) in ({'left'}, {'right'})]
+    return max(cands, key=lambda kv: kv[1]) if cands else None
 
 
 class Rig(Node):
@@ -234,15 +255,15 @@ def main():
                   '的目标才能验"找到了"与"看到了但不够分"这两句。'
                   '把车对着任何一个能检出的东西（人或物）再来。')
             return 4
-        label, score = max(rig.labels.items(), key=lambda kv: kv[1])
-        print(f'  · 画面里最强的那个类别：{label!r}（score≈{score:.2f}）')
+        best_label, score = max(rig.labels.items(), key=lambda kv: kv[1])
+        print(f'  · 画面里最强的那个类别：{best_label!r}（score≈{score:.2f}）')
         print()
 
-        st, js, msg = rig.ask(label, 0.0)
+        st, js, msg = rig.ask(best_label, 0.0)
         rep('[1] 画面里真有的东西 ⇒ TARGET_FOUND', st == 'TARGET_FOUND',
             f'{st}｜{msg}')
 
-        st, js, msg = rig.ask(label, min(1.0, round(score + 0.05, 3)))
+        st, js, msg = rig.ask(best_label, min(1.0, round(score + 0.05, 3)))
         rep('[2] 门槛抬到够不着 ⇒ TARGET_LOST，**且必须说"看到了、只是低于门槛"**',
             st == 'TARGET_LOST' and '低于你要的' in (msg or ''),
             f'{st}｜{msg}')
@@ -263,15 +284,24 @@ def main():
         # ⚠️ 用例要求那个类别**只出现在一侧、且从不贴近中线**（见 `SIDE_MARGIN`）——
         #    否则测出来的是一个与 `side` 无关的结论，宁可**三格一起跳过**。
         # 🔴 三个一起跳是刻意的：只跑 [5a] 或只跑 [5c] 都会给出"看起来通过"的错结论。
-        halves = rig.halves.get(label, set())
-        if halves not in ({'left'}, {'right'}):
-            seen = '、'.join(sorted(halves)) or '（一帧都没记录到）'
-            why = (f'挑中的 {label!r} 出现过的位置是 {seen}，不是"只在一侧"'
+        # ⚠️ 这一组**自己挑**目标（挑一个只在一侧的），不沿用 [1]/[2] 那个 label ——
+        #    见 `pick_one_sided` 的说明：共用一个 label 会让这三格因为
+        #    "画面里另有一个更亮的、靠中线的物体"而永远跳过。
+        picked = pick_one_sided(rig.labels, rig.halves)
+        if picked is None:
+            seen = '、'.join(sorted({h for hs in rig.halves.values() for h in hs})) \
+                or '（一帧都没记录到）'
+            why = (f'画面里没有一个类别是"只在一侧"的（出现过的位置：{seen}）'
                    f'（本组要一个**只在一侧**的目标；把车对着单个东西再来）')
             skip('[5a] 东西在这一侧、问**这一侧** ⇒ TARGET_FOUND', why)
-            skip('[5b] 答复里的 position 与问的那一侧一致', why)
+            skip('[5b] 答复里的 `position` 与问的那一侧一致', why)
             skip('[5c] 东西在**另一侧**时问这一侧 ⇒ TARGET_LOST', why)
         else:
+            label, score = picked
+            halves = rig.halves.get(label, set())
+            if label != best_label:
+                print(f'  · [5a]/[5b]/[5c] 改用**只在一侧**的那个类别：'
+                      f'{label!r}（score≈{score:.2f}；[1]/[2] 用的是 {best_label!r}）')
             here = next(iter(halves))
             other = 'right' if here == 'left' else 'left'
             zh = '左' if here == 'left' else '右'
