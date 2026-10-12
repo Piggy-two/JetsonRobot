@@ -125,13 +125,17 @@ class AgentRuntime(Node):
         # ⚠️ 只写**变量名**，不写密钥本身 —— 密钥绝不进仓库（CLAUDE.md §6）。
         self.declare_parameter('llm_api_key_env', '')
         self.declare_parameter('llm_timeout', 8.0)
-        # ⚠️ **4096 而不是一个小数目**：2026-10-09 对着真端点（DeepSeek）实测发现，
-        #    **推理模型的思维链也计入 `max_tokens`**，而且抖动极大 —— 同一个重规划
-        #    提示词三次实测分别消耗 321 / **1200(吃满，回包全空)** / 614 tokens，
+        # ⚠️ **8192，而且是**往上调过一次**的数**：2026-10-09 对着真端点（DeepSeek）
+        #    实测发现，**推理模型的思维链也计入 `max_tokens`**，而且抖动极大 ——
+        #    同一个重规划提示词三次实测分别消耗 321 / **1200(吃满，回包全空)** / 614 tokens，
         #    另一轮光推理就用了 **2708**。默认 400 会让重规划那一问**基本必空**，
         #    而症状是"回包里的内容是空的"，看起来像网络故障（见 DEV_NOTES 坑 38）。
+        # 🔴 **2026-10-12 又撞了一次**：`llm_replan_style_probe.py` 对真端点跑 10 次重试，
+        #    **2 次被截断**（回包报"恰好用满 4096"）—— 也就是 4096 **仍然不够**。
+        #    在运行时里那 20% 就是**白白丢掉一次重规划**（决策 D-052）。
         #    这个值是**上限**、不是计费量，调大几乎不花钱；真正的护栏是 `llm_timeout`。
-        self.declare_parameter('llm_max_tokens', 4096)
+        #    ⚠️ 别再靠"这次没截断"就往下调 —— 截断率是**抽样**出来的，不是推出来的。
+        self.declare_parameter('llm_max_tokens', 8192)
 
         g = lambda n: self.get_parameter(n).value          # noqa: E731
 

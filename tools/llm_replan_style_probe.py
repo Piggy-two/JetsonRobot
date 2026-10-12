@@ -264,7 +264,13 @@ def report(labels, title):
     print('=' * 78)
 
 
-def main():
+def build_parser():
+    """参数表单独一个函数 —— **好让单测能读默认值**。
+
+    ⚠️ 其中 `--max-tokens` 的默认值必须与运行时的 `llm_max_tokens` **一致**，
+    否则这里量到的截断率不是运行时那个截断率（那条正是 D-052 的依据）。
+    有单测把它钉住。
+    """
     ap = argparse.ArgumentParser(description='真模型的重试风格探针（只读、不碰 ROS、不动车）')
     ap.add_argument('--phase', choices=['ask', 'chain'], default='ask')
     ap.add_argument('--text', default=DEFAULT_TEXT, help='交给模型的任务那句话')
@@ -277,9 +283,15 @@ def main():
     ap.add_argument('--api-key-env', default='DEEPSEEK_API_KEY',
                     help='从哪个环境变量读密钥（**不回显**）')
     ap.add_argument('--timeout', type=float, default=60.0)
-    ap.add_argument('--max-tokens', type=int, default=4096,
-                    help='⚠️ 推理模型的思维链也计入额度，给小了会被截断（D-045）')
-    args = ap.parse_args()
+    ap.add_argument('--max-tokens', type=int, default=8192,
+                    help='⚠️ 推理模型的思维链也计入额度，给小了会被截断（D-045 / D-052）。'
+                         '默认与运行时的 `llm_max_tokens` **保持一致** —— 不一致的话，'
+                         '这里量到的截断率就不是运行时那个截断率了')
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
 
     if not args.base_url or not args.model:
         print('⛔ 拒测：`--base-url` 与 `--model` 都必须显式给出 —— 不给就什么也不发。')

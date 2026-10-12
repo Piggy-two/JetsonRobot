@@ -205,3 +205,35 @@ def test_seed_plan_is_accepted_by_the_real_registry():
 
 def test_default_scenario_is_not_empty():
     assert probe.DEFAULT_TEXT.strip()
+
+
+# --------------------------------------------------------------------------
+# token 预算必须与运行时**同源**
+# --------------------------------------------------------------------------
+
+_RUNTIME_CFG = (Path(probe.__file__).resolve().parents[1] / 'embodied_agent_ws'
+                / 'src' / 'embodied_agent_runtime' / 'config' / 'agent_runtime.yaml')
+
+
+def test_probe_max_tokens_matches_the_runtime_default():
+    """★ 探针的 token 预算必须与运行时的 `llm_max_tokens` **一致**。
+
+    ⚠️ 不一致的话，这里量到的**截断率**就不是运行时那个截断率 ——
+    而"10 次里 2 次被截断"正是 D-052 把默认值提到 8192 的**唯一依据**。
+    判据两边各写一个数，迟早分家（**D-040 / 坑 27** 的老毛病）。
+    """
+    import yaml
+
+    params = yaml.safe_load(_RUNTIME_CFG.read_text())['agent_runtime']['ros__parameters']
+    runtime = params['llm_max_tokens']
+    probe_default = probe.build_parser().get_default('max_tokens')
+    assert probe_default == runtime, (
+        f'探针默认 --max-tokens={probe_default} 与运行时 llm_max_tokens={runtime} 不一致 '
+        f'—— 那会让探针量到的截断率不是运行时那个')
+
+
+def test_defaults_are_readable_from_the_parser():
+    """⚠️ 默认值要能被单测读到，所以参数表必须留一个 `build_parser()` 出口。"""
+    ap = probe.build_parser()
+    assert ap.get_default('phase') in ('ask', 'chain')
+    assert ap.get_default('api_key_env') == 'DEEPSEEK_API_KEY'
