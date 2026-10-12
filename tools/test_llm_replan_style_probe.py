@@ -177,3 +177,31 @@ def test_refuses_on_a_missing_registry(monkeypatch, capsys):
     monkeypatch.setattr(sys, 'argv', _argv(registry='/nope/none.yaml'))
     assert probe.main() == 4
     assert '读不到技能注册表' in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# 种子计划必须**过得了真的注册表**
+# --------------------------------------------------------------------------
+
+def test_seed_plan_is_accepted_by_the_real_registry():
+    """★ 这条是**从一次真实拒测里长出来的**（2026-10-12）。
+
+    第一版种子只给了 `max_distance`，探针一跑就拒测：
+    "缺少必填参数 ['clear_range', 'step']" —— 而那要等到**真的跑起来**才知道。
+    ⇒ 把种子钉在真注册表上，这类错在离线就该现形。
+
+    ⚠️ 它同时钉住另一件事：**种子是一次"真的会失败"的尝试** ——
+    如果哪天这个技能被改名或参数表变了，这里会先响。
+    """
+    from embodied_agent_runtime import planner
+    from embodied_skill_gateway.registry import Registry
+
+    reg = Registry.from_yaml(str(probe.DEFAULT_REGISTRY))
+    res = planner.accept_plan(probe.SEED_PLAN, reg, 'test')
+    assert res.accepted, f'种子计划过不了注册表：{res.reason}'
+    assert res.steps, '种子计划解析出来是空的'
+    assert res.steps[0].skill == 'autonomous.advance_until_blocked'
+
+
+def test_default_scenario_is_not_empty():
+    assert probe.DEFAULT_TEXT.strip()

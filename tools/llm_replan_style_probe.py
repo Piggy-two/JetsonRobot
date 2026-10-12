@@ -55,9 +55,12 @@ D-045 接上真模型之后，观察到一个它挡不住的模式：
 
 状态（诚实标注）
 ----------------
-    离线：**已验** —— 判定逻辑 16 项单测；"没密钥/没端点就拒测"实跑过（退出码 4）。
-    真端点：**尚未跑** —— 2026-10-12 环境里没有 `DEEPSEEK_API_KEY`。
-            ⇒ 本工装产出的**任何分布**目前都不存在，别引用一个没跑过的结论。
+    离线：**已验** —— 判定逻辑 18 项单测（含"种子计划必须过真注册表"）；
+          "没密钥/没端点就拒测"在真 CLI 上实跑过（退出码 4）。
+    真端点：**已跑**（2026-10-12，`deepseek-flash`，`ask --n 3` + `chain --chains 6`）。
+          结果见 `docs/DEVELOPMENT_LOG.md` 2026-10-12 第二轮 ——
+          一句话：**"参数改小"0/10、"换另一边绕"1/10、"真换走法"7/10、
+          传输失败（截断）2/10**。
 """
 
 import argparse
@@ -80,6 +83,14 @@ DEFAULT_REGISTRY = (Path(__file__).resolve().parents[1] / 'embodied_agent_ws'
 #: 默认场景。与真机上用过的那句同族（"绕开障碍继续往前"，D-045 记录里它**自己**
 #: 给出了三步脱困计划并收敛）。换一句话就是换一个实验，所以做成参数。
 DEFAULT_TEXT = '绕开障碍继续往前'
+
+#: `ask` 相位用的种子（"第 1 次尝试"）：一次**真的会失败**的 `advance_until_blocked`。
+#:
+#: ⚠️ 三个参数一个都不能少 —— 注册表里 `clear_range` 与 `step` 是**必填**
+#: （2026-10-12 第一版只写了 `max_distance`，探针当场拒测：
+#:  "缺少必填参数 ['clear_range', 'step']"）。参数值取 D-045 记录里那个三元组。
+SEED_PLAN = [{'skill': 'autonomous.advance_until_blocked',
+              'args': {'max_distance': 0.3, 'clear_range': 0.5, 'step': 0.1}}]
 
 
 # --------------------------------------------------------------------------
@@ -162,17 +173,15 @@ def _one_try(text, reg, client, tried, states, log=print):
         return None, f'**那一跳没跑成**（{exc}）—— 这不是"模型不会"，是没接上', ''
     except llm_client.LlmTransportError as exc:
         return None, f'**传输失败**（{type(exc).__name__}：{exc}）', ''
-    if not result.ok:
+    if not result.accepted:
         return None, f'被拒：{result.reason}', raw
     return result.steps, '', raw
 
 
 def phase_ask(args, reg, client):
     """同一条失败历史，问 N 次 —— 看**分布**。"""
-    seed = planner.accept_plan(
-        [{'skill': 'autonomous.advance_until_blocked', 'args': {'max_distance': 0.5}}],
-        reg, 'probe')
-    if not seed.ok:
+    seed = planner.accept_plan(SEED_PLAN, reg, 'probe')
+    if not seed.accepted:
         print(f'  ⛔ 种子计划自己就不合法（{seed.reason}）—— 探针的前提没了，拒测。')
         return Counter()
     first = seed.steps
@@ -195,11 +204,18 @@ def phase_ask(args, reg, client):
 
 
 def phase_chain(args, reg, client):
-    """模拟一整条链：把模型自己给的计划当作"又失败了"接回历史，直到预算用完。"""
+    """模拟一整条链：把模型自己给的计划当作"又失败了"接回历史，直到预算用完。
+
+    🔒 **判据 A 拒绝时，链就停** —— 运行时也是那么做的（`check_new_plan` 在派发**之前**
+    拦下，然后 `replan` 收尾）。第一版不管拒没拒都往下接，等于喂给模型一个
+    **现实中不会发生的历史** —— 那样量出来的分布是假的。
+    """
     print(f'  模拟 {args.chains} 条链，每条最多 {args.max_replans + 1} 步'
           f'（每次失败都记 BLOCKED —— **最坏情况**）')
     print()
     labels = Counter()
+    stopped_early = 0          # 判据 A 把它挡下的链数（模型给出了"一字不差"的重来）
+    burned = 0                 # 预算烧光、一次都没被挡的链数
     for c in range(1, args.chains + 1):
         tried, states = [], []
         print(f'  ── 第 {c} 条链 ──')
@@ -210,21 +226,28 @@ def phase_chain(args, reg, client):
                 print(f'     {step + 1}. ⚠️ {err}')
                 break
             if tried:
-                tag = classify_retry(tried[-1], steps)
-                labels[tag] += 1
-                print(f'     {step + 1}. {tag}')
+                labels[classify_retry(tried[-1], steps)] += 1
+                print(f'     {step + 1}. {classify_retry(tried[-1], steps)}')
             else:
                 print(f'     {step + 1}. （首次规划）')
             print(f'         {planner.render_plan(steps)}')
-            # 🔒 真闸门也跑一遍 —— 这一条正是运行时**会拒掉**的那种
             if tried:
+                # 🔒 真闸门也跑一遍 —— 判据与运行时**同源**（同一个函数）
                 rec = type('R', (), {'attempts': list(tried)})()
                 ok, why = replan.check_new_plan(steps, rec, allow_motion=True)
-                print(f'         ⇒ 现有判据 A：{"放行" if ok else "**拒绝**"}'
-                      f'{"（" + why + "）" if why else ""}')
+                if not ok:
+                    print(f'         ⇒ 现有判据 A **拒绝**（{why}）—— 链到此为止，'
+                          f'运行时也会在这里停')
+                    stopped_early += 1
+                    break
             tried.append(steps)
             states.append('BLOCKED')
+        else:
+            burned += 1
         print()
+    print(f'  ── 链的结局 ──')
+    print(f'     被判据 A 挡下（模型给出"一字不差"的重来）：{stopped_early}/{args.chains}')
+    print(f'     预算烧光、一次都没被挡                    ：{burned}/{args.chains}')
     return labels
 
 
