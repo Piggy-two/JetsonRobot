@@ -327,7 +327,12 @@ def main():
                 f'{st}｜{msg}')
 
         # ---- [6]：side 写成不认识的词 ----
-        st, js, msg = rig.ask(label, 0.0, side=BAD_SIDE)
+        # ⚠️ 用 `best_label` 而不是 [5*] 那个 label —— [6] 问的是"**side 写错**"，
+        #    与目标在哪一侧无关，所以它**不该**跟着 [5*] 一起被跳过。
+        #    🔴 2026-10-12：这里原来写的是 `label`，而它只在 [5*] 的分支里才被绑上 ⇒
+        #    **跳过那条路上这里直接 `UnboundLocalError`**。上一次跑没暴露它，
+        #    正是因为那次没走跳过这条路。
+        st, js, msg = rig.ask(best_label, 0.0, side=BAD_SIDE)
         rep(f'[6] side 写成不认识的 {BAD_SIDE!r} ⇒ **FAILED**（不知道），'
             f'绝不能是 TARGET_LOST',
             st == 'FAILED' and 'side' in (msg or '') and '不知道' in (msg or ''),

@@ -117,6 +117,22 @@ def test_side_margin_matches_the_rule_it_claims_to_respect():
     assert va.SIDE_MARGIN >= 1 / 3
 
 
+def test_case_6_does_not_borrow_a_variable_from_the_skippable_branch():
+    """🔴 这条是**从一次真实崩溃里长出来的**（2026-10-12）。
+
+    `[6]` 原来引用 `label`，而 `label` 只在 [5*] 那个 `else` 分支里被绑上
+    ⇒ **跳过那条路上 `[6]` 直接 `UnboundLocalError`**。
+    上一次跑没暴露它，正是因为**那次没走跳过这条路**。
+
+    ⇒ `[6]` 问的是"side 写错"，与目标在哪一侧无关，它**不该**跟着 [5*] 一起被跳过；
+    它必须用那个**在两条路上都绑好了**的 `best_label`。
+    """
+    assert 'rig.ask(best_label, 0.0, side=BAD_SIDE)' in SRC, \
+        '[6] 又去借那个只在 [5*] 分支里存在的变量了 —— 跳过时它会崩'
+    # 反面：整个 main 里不许再出现"裸 label" 当 ask 的第一个参数
+    assert 'rig.ask(label, 0.0, side=BAD_SIDE)' not in SRC
+
+
 def test_case_list_in_the_docstring_matches_the_labels_used():
     """文档里的用例清单与实际打出来的标签**不许分家**。"""
     for tag in ('[1]', '[2]', '[3]', '[4]', '[5a]', '[5b]', '[5c]', '[6]'):
