@@ -4,6 +4,9 @@
 
     ⚠️ 这是【验收工装】，不是运行时组件。
     ⚠️ **前提：四轮离地。** 轮子在空中转，车不会跑掉。
+    ⚠️ **另一条前提（D-050）：本项目是唯一在发指令的人。** 架空**也是**在驱动底盘 ——
+       厂商 app 生态走另一条 Twist 入口 `/controller/cmd_vel`，绕开本项目全部四道防线。
+       ✅ 起飞前有闸门（不干净 ⇒ 拒测），全程另有并发观察（⇒ **结论作废**、退出码 3）。
 
 为什么要有这个（和 dry-run 验收的区别）
 ---------------------------------------
@@ -56,6 +59,7 @@
 退出码：0 = 全部断言通过；1 = 有失败。
 """
 
+import argparse
 import sys
 import threading
 import time
@@ -69,6 +73,11 @@ from ros_robot_controller_msgs.msg import MotorsState
 from sensor_msgs.msg import Imu
 
 from embodied_skills_interfaces.srv import MoveRelative
+
+# ⚠️ D-050：会**命令真车运动**的入口，自己执行那道前置闸门 + 全程观察。
+#    架空（四轮离地）**也是**在驱动底盘 —— 那次验收的结论同样只有在
+#    「本项目是唯一在发指令的人」的前提下才成立。注释拦不住任何人。
+import vendor_channels as vc
 
 SET_MOTOR = '/ros_robot_controller/set_motor'
 IMU = '/ros_robot_controller/imu_raw'
@@ -187,8 +196,19 @@ class SuspendedTester(Node):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    vc.add_arguments(ap)
+    args = ap.parse_args()
+
+    # ⚠️ D-050 的前置闸门：**起飞前**就不干净 ⇒ 拒测（还没开始动，最安全的地方）。
+    #    自检模式（--vendor-watch-topics）也在这里结束，**绝不**进入运动流程。
+    _rc = vc.install(args)
+    if _rc is not None:
+        return _rc
+
     rclpy.init()
     node = SuspendedTester()
+    vc.attach(node)         # 全程观察：结束时报"期间有没有第二个司机"
     ok = True
     results = []
 
@@ -358,7 +378,7 @@ def main():
         print('     位移精度仍需地面实测（那是另一件事）。')
         print('=' * 74)
         print()
-        return 0 if ok else 1
+        return vc.finalize(0 if ok else 1)
     finally:
         try:
             node.fire(node.ctrl_stop)

@@ -4,10 +4,11 @@
 
     ⚠️ 这是【验收工装】。**它会命令真车运动** —— 必须有人在车边、手能直接断电
        （本机没有物理急停 #22）。
-    ⚠️ **先跑 `python3 tools/vendor_cmd_channel_check.py`** —— 本工装的结论只有在
-       「本项目是唯一在发指令的人」这个前提下才成立（**D-050**）：
+    ⚠️ 本工装的结论只有在「本项目是唯一在发指令的人」这个前提下才成立（**D-050**）：
        厂商 app 生态走的是另一条 Twist 入口 `/controller/cmd_vel`，
        **不受本项目任何一道防线约束**。
+       ✅ **这道前提现在由本工装自己执行**（不是靠人记得）：起飞前有闸门（不干净 ⇒ 拒测），
+       整场另有并发观察（期间出现过非零 ⇒ **结论作废**、退出码 3）。见 `vendor_channels`。
 
 它回答的问题
 ------------
@@ -65,6 +66,10 @@ from std_srvs.srv import Trigger
 
 from embodied_skills_interfaces.msg import SkillEvent
 from embodied_skills_interfaces.srv import AgentTask
+
+# ⚠️ D-050：会**命令真车运动**的入口，自己执行那道前置闸门 + 全程观察。
+#    "先跑一下 `vendor_cmd_channel_check.py`"是一条**注释** —— 而注释拦不住任何人。
+import vendor_channels as vc
 
 SUBMIT = '/agent_runtime/submit'
 STATUS = '/embodied/agent/status'
@@ -185,10 +190,18 @@ def main():
                          '保证不是"一开跑就已经在安全区里"）。'
                          '⚠️ 不声明时**不许**用低余量跑 —— 那会把"没条件"读成"功能坏了"')
     ap.add_argument('--timeout', type=float, default=90.0, help='整条任务的上限（秒）')
+    vc.add_arguments(ap)
     args = ap.parse_args()
+
+    # ⚠️ D-050 的前置闸门：**起飞前**就不干净 ⇒ 拒测（还没开始动，最安全的地方）。
+    #    自检模式（--vendor-watch-topics）也在这里结束，**绝不**进入运动流程。
+    _rc = vc.install(args)
+    if _rc is not None:
+        return _rc
 
     rclpy.init()
     rig = Rig()
+    vc.attach(rig)          # 全程观察：结束时报"期间有没有第二个司机"
     results = []
 
     def rep(name, ok, detail):
@@ -336,7 +349,7 @@ def main():
         print('  ⚠️ 判据是"**命令有没有变成真位移**"；位移的**精度**另见 '
               'ground_motion_acceptance.py 的 distance 相位')
         print('=' * 74)
-        return 0 if not failed else 1
+        return vc.finalize(0 if not failed else 1)
     finally:
         rig.destroy_node()
         if rclpy.ok():

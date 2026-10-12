@@ -5,6 +5,8 @@
     ⚠️ 这是【演示工装】，不是运行时组件。它**不做判定**（判定在
        `agent_ground_acceptance.py`（真机）与 `llm_planner_acceptance.py`（接口）里），
        只把"发生了什么"讲清楚，并且**该说的风险照说**（干跑 / 转过方向 / 被安全层拦住）。
+    ⚠️ **它会命令真车运动**（取决于起栈时的 `dry_run`）—— 人必须在场、能直接断电。
+       ✅ 起飞前有 D-050 那道闸门（厂商 app 在发速度 ⇒ 拒测），全程另有并发观察。
 
 它讲的是这条故事
 ----------------
@@ -43,6 +45,10 @@ from std_msgs.msg import Float64MultiArray, String
 
 from embodied_skills_interfaces.msg import SkillEvent
 from embodied_skills_interfaces.srv import AgentTask
+
+# ⚠️ D-050：会**命令真车运动**的入口，自己执行那道前置闸门 + 全程观察。
+#    "先跑一下 `vendor_cmd_channel_check.py`"是一条**注释** —— 而注释拦不住任何人。
+import vendor_channels as vc
 
 SUBMIT = '/agent_runtime/submit'
 STATUS = '/embodied/agent/status'
@@ -163,10 +169,18 @@ def main():
     ap.add_argument('--settle', type=float, default=10.0,
                     help='事件流安静多久算讲完了（秒）。⚠️ 要大于一次模型调用的耗时')
     ap.add_argument('--timeout', type=float, default=120.0, help='整段的上限（秒）')
+    vc.add_arguments(ap)
     args = ap.parse_args()
+
+    # ⚠️ D-050 的前置闸门：**起飞前**就不干净 ⇒ 拒测（还没开始动，最安全的地方）。
+    #    自检模式（--vendor-watch-topics）也在这里结束，**绝不**进入运动流程。
+    _rc = vc.install(args)
+    if _rc is not None:
+        return _rc
 
     rclpy.init()
     node = Demo()
+    vc.attach(node)         # 全程观察：结束时报"期间有没有第二个司机"
     try:
         print()
         print('=' * 72)
@@ -302,7 +316,7 @@ def main():
         print('  ⚠️ 这是**演示**，不是验收 —— 判定在 `agent_ground_acceptance.py`（真机）')
         print('     与 `llm_planner_acceptance.py`（接口与失败路径）')
         print('=' * 72)
-        return 0
+        return vc.finalize(0)
     finally:
         node.destroy_node()
         if rclpy.ok():

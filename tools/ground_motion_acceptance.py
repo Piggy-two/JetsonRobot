@@ -5,10 +5,11 @@
     ⚠️ 这是【验收工装】，不是运行时组件。
     ⚠️ 前提：**四轮着地、正前方 ≥2.5 m 通畅、约 2.0 m 处有一面墙/大箱子**。
     ⚠️ 会让 Motor Driver 以 `dry_run:=false` 运行 —— **人必须在场、能直接断电**。
-    ⚠️ **先跑 `python3 tools/vendor_cmd_channel_check.py`** —— 本工装的结论只有在
-       「本项目是唯一在发指令的人」这个前提下才成立（**D-050**）：
+    ⚠️ 本工装的结论只有在「本项目是唯一在发指令的人」这个前提下才成立（**D-050**）：
        厂商 app 生态走的是另一条 Twist 入口 `/controller/cmd_vel`，
        **不受本项目任何一道防线约束**。那上面有人发速度 ⇒ 本次位移/转向读数作废。
+       ✅ **这道前提现在由本工装自己执行**（不是靠人记得）：起飞前有闸门（不干净 ⇒ 拒测），
+       整场另有并发观察（期间出现过非零 ⇒ **结论作废**、退出码 3）。见 `vendor_channels`。
 
 它要回答的问题：**"走到位了"这件事，到这个项目里第一次有独立证据之前，是不知道的。**
 ----------------------------------------------------------------------------------
@@ -60,6 +61,10 @@ from std_srvs.srv import Trigger
 
 from geometry_msgs.msg import Twist
 from embodied_skills_interfaces.srv import AdvanceUntilBlocked, MoveRelative, Rotate
+
+# ⚠️ D-050：会**命令真车运动**的入口，自己执行那道前置闸门 + 全程观察。
+#    "先跑一下 `vendor_cmd_channel_check.py`"是一条**注释** —— 而注释拦不住任何人。
+import vendor_channels as vc
 
 SCAN = '/scan'
 ODOM = '/odom'
@@ -663,12 +668,20 @@ def main():
     ap.add_argument('--step', type=float, default=0.1)
     ap.add_argument('--angle', type=float, default=1.5707963267948966,
                     help='--phase rotate 请求的角度（弧度，逆时针为正）')
+    vc.add_arguments(ap)
     args = ap.parse_args()
     if args.phase is None and not args.dry_measure:
         ap.error('要么给 --phase，要么给 --dry-measure')
 
+    # ⚠️ D-050 的前置闸门：**起飞前**就不干净 ⇒ 拒测（还没开始动，最安全的地方）。
+    #    自检模式（--vendor-watch-topics）也在这里结束，**绝不**进入运动流程。
+    _rc = vc.install(args)
+    if _rc is not None:
+        return _rc
+
     rclpy.init()
     node = GroundTester()
+    vc.attach(node)         # 全程观察：结束时报"期间有没有第二个司机"
     results = []
 
     if args.dry_measure:
@@ -691,9 +704,9 @@ def main():
                   f'（车体前伸量 {BODY_FRONT_AHEAD:.4f} m）')
             if rr < MIN_REFERENCE_RANGE:
                 print(f'  ⛔ 太近了（< {MIN_REFERENCE_RANGE} m）—— 车要往前开 0.8 m，拒测。')
-                return 1
+                return vc.finalize(1)
             print(f'  ✅ 摆位合格（正前方有 ≥{MIN_REFERENCE_RANGE} m 的参照面、大致垂直于车）')
-            return 0
+            return vc.finalize(0)
         finally:
             node.destroy_node()
             if rclpy.ok():
@@ -742,7 +755,7 @@ def main():
               '取决于用途 —— 数字都摊在上面，别替它下结论。')
         print('=' * 74)
         print()
-        return 0 if not failed else 1
+        return vc.finalize(0 if not failed else 1)
     finally:
         try:
             node.set_raw(0.0)

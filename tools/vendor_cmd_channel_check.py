@@ -67,88 +67,27 @@ import sys
 import time
 
 import rclpy
-from geometry_msgs.msg import Twist
 from rclpy.node import Node
 
-#: 三条入口。`ours` 标出哪条是本项目的 —— 其余两条出现非零就要报警。
-CHANNELS = (
-    ('/cmd_vel', True, '本项目的栈（Motor Driver / Safety 零速流）'),
-    ('/controller/cmd_vel', False, '厂商的 app 生态（⚠️ 无限幅、无闸门）'),
-    ('/app/cmd_vel', False, '厂商手机 app 那一侧'),
-)
-
-#: 已知的**底盘入口**。只有这些话题上出现非零，"有人在驱动底盘"才是**有依据**的结论；
-#: 自检（`--topics`）指向别的话题时，工装只报读数、**不下这个结论**。
-KNOWN_CHASSIS = frozenset(t for t, _, _ in CHANNELS)
-
-#: 判定"非零"的阈值。⚠️ 与其它工装一致：浮点噪声不算数。
-EPS = 1e-9
+# ⚠️ 通道清单、"非零"的判定、读图的重试逻辑 —— **全部来自 `vendor_channels`**。
+#    那是单一事实源，本工装只是它的一个 CLI 外壳。理由：会动车的验收工装有 6 个，
+#    它们与本工装共用同一份判据，而判据散成七份迟早会分家
+#    —— **D-040 / 坑 27** 就是这么长出过一个死区的。
+import vendor_channels as vc
 
 
 class Rig(Node):
-    def __init__(self, channels=CHANNELS):
-        super().__init__('vendor_cmd_channel_check')
-        self.channels = channels
-        self.stats = {t: {'frames': 0, 'nonzero': 0, 'peak': 0.0}
-                      for t, _, _ in channels}
-        for topic, _, _ in channels:
-            self.create_subscription(
-                Twist, topic,
-                lambda m, t=topic: self._on_twist(t, m), 50)
+    """本工装的节点。判据一律委托给 `vendor_channels`（这里不写第二份）。"""
 
-    def _on_twist(self, topic, msg):
-        s = self.stats[topic]
-        s['frames'] += 1
-        mag = max(abs(msg.linear.x), abs(msg.linear.y), abs(msg.angular.z))
-        if mag > EPS:
-            s['nonzero'] += 1
-            s['peak'] = max(s['peak'], mag)
+    def __init__(self, channels=vc.CHANNELS):
+        super().__init__('vendor_cmd_channel_check')
+        self.watch = vc.Watch(self, channels)
+        self.channels = channels
+        self.stats = self.watch.stats
 
     def publishers(self, topic, attempts=5, gap=0.2):
-        """ROS 图里**有能力发**的人（与"此刻在发"无关）。
-
-        ⚠️ 返回 `(最多看到几个, 名字集合, 读不到名字的个数)` —— **计数是下界**。
-
-        为什么不能只查一次：2026-10-09 实测，同一条话题上
-        `ros2 topic info -v` 报 **5 个**发布者，而本方法的**单次**查询只报 **4 个**、
-        其中 3 个连名字都读不到。图发现是**逐渐**的，一次查询会**偏低** ——
-        而"报少了"正是本工装存在的理由所要防的那种错（**没看到 ≠ 没有**）。
-        ⇒ 重试取并集；即便如此也只保证"**至少**这么多"，所以结论里**不许**写"就这些"。
-
-        名字读不到时**如实说读不到**，绝不拿占位符当节点名印出去。
-        """
-        seen = {}
-        unnamed = 0          # ⚠️ **单次最多**读到几个占位符，不是各次累加 ——
-        count = 0            #    累加会把"3 个读不到"报成"15 个读不到"。
-        for _ in range(max(1, attempts)):
-            try:
-                info = list(self.get_publishers_info_by_topic(topic))
-            except Exception:                          # noqa: BLE001
-                return None
-            count = max(count, len(info))
-            blind = 0
-            for i in info:
-                name = _endpoint_name(i)
-                if name is None:
-                    blind += 1
-                else:
-                    seen[name] = True
-            unnamed = max(unnamed, blind)
-            time.sleep(gap)
-        return count, sorted(seen), unnamed
-
-
-def _endpoint_name(info):
-    """一个发布者的名字；**读不到时返回 `None`**（不是编一个名字出来）。
-
-    ⚠️ ROS 有时只给占位符（`_NODE_NAME_UNKNOWN_`）—— 那时**如实说读不到**，
-    不要把一个占位符当成节点名印出去（那会让人以为真有个叫这名字的节点）。
-    """
-    name = str(getattr(info, 'node_name', '') or '')
-    ns = str(getattr(info, 'node_namespace', '') or '')
-    if not name or 'UNKNOWN' in name.upper() or 'UNKNOWN' in ns.upper():
-        return None
-    return f'{ns.rstrip("/")}/{name}'.lstrip('/')
+        """见 `vendor_channels.publishers`（含"单次查询会偏低"那一条）。"""
+        return vc.publishers(self, topic, attempts, gap)
 
 
 def main():
@@ -163,7 +102,7 @@ def main():
     if args.topics:
         channels = tuple((t, False, '⚠️ 自检用（非本项目通道）') for t in args.topics)
     else:
-        channels = CHANNELS
+        channels = vc.CHANNELS
 
     rclpy.init()
     rig = Rig(channels)
@@ -188,7 +127,7 @@ def main():
             rig.destroy_node()
             if rclpy.ok():
                 rclpy.shutdown()
-            return 4
+            return vc.EXIT_REFUSE
         graph[topic] = info
 
     print('  ── 谁**有能力**发（ROS 图；与"此刻在不在发"无关）──')
@@ -219,25 +158,11 @@ def main():
         pass
 
     print()
-    bad = []
     for topic, ours, why in channels:
-        s = rig.stats[topic]
-        if s['frames'] == 0:
-            verdict = '**一秒都没发**'
-        elif s['nonzero'] == 0:
-            verdict = f'发了 {s["frames"]} 帧，**全是零**（不会让车动）'
-        else:
-            # ⚠️ 只有**已知的底盘入口**才敢说"有人在驱动底盘"。
-            #    自检模式指向的是一条我们不了解的话题 —— 那时**只报读数，不下结论**
-            #    （下了就是无依据的结论，而这正是本工装要防的东西）。
-            tail = ('—— 有人在真的驱动底盘'
-                    if topic in KNOWN_CHASSIS
-                    else '—— ⚠️ 这条话题上出现了非零帧（本工装**不知道它通向哪里**）')
-            verdict = (f'⚠️ 发了 {s["frames"]} 帧，其中 **{s["nonzero"]} 帧非零**'
-                       f'（峰值 {s["peak"]:.3f}）{tail}')
-            if not ours:
-                bad.append(topic)
-        print(f'    {topic:<22} {verdict}')
+        # ⚠️ 措辞来自 `vendor_channels.describe` —— 本工装不写第二份
+        #    （"只有已知的底盘入口才敢说有人在驱动底盘"那条就在里面）。
+        print(f'    {topic:<22} {vc.describe(topic, rig.stats[topic], ours)}')
+    bad = vc.second_drivers(rig.stats, channels)
 
     print()
     print('=' * 78)
@@ -251,12 +176,14 @@ def main():
         else:
             print('  ⇒ **这次运动验收的结论不能采信** —— 有第二个司机，')
             print('     测出来的位移/转向不一定是我们的。先让那些 app 停下来再测。')
-        rc = 1
+        rc = vc.EXIT_SECOND_DRIVER
     else:
         print('  ✅ **干净**：三条通道上都没有非零帧 —— 此刻没有别人在驱动底盘。')
         print('  ⚠️ 这只说明**此刻**。它证明不了下一秒 —— 厂商那些 app 还挂着，')
         print('     任何一个被使能（摇杆 / app / 服务）都会绕过本项目全部四道防线。')
-        rc = 0
+        print('  ⚠️ 而**这一点已经不再是靠人记得了**：6 个会动车的验收工装现在')
+        print('     各自执行同一道闸（`vendor_channels.install`），并且全程盯着。')
+        rc = vc.EXIT_CLEAN
     print('=' * 78)
 
     rig.destroy_node()

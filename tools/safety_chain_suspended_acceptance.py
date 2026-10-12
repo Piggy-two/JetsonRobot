@@ -7,6 +7,9 @@
        **`direction` 一段不要求**：它把"该被拦住"的那一步放在任何位移之前，
        所以车在该停的时候本来就不该动 —— 但**仍需要有人看护、能直接断电**。
     ⚠️ 本工装会让 Motor Driver 以 `dry_run:=false` 运行 —— **人必须在场、能直接断电**。
+    ⚠️ 前提还有一条（**D-050**）：**本项目是唯一在发指令的人**。厂商 app 生态走
+       `/controller/cmd_vel`，绕开本项目全部四道防线 —— 它一说话，本工装的读数就作废。
+       ✅ 起飞前有闸门（不干净 ⇒ 拒测），全程另有并发观察（⇒ **结论作废**、退出码 3）。
 
 它要回答的问题：**"停"这件事，在物理上真的成立吗？**
 ------------------------------------------------------
@@ -74,6 +77,10 @@ from std_srvs.srv import Trigger
 from ros_robot_controller_msgs.msg import MotorsState
 
 from embodied_skills_interfaces.srv import MoveRelative, SectorMinRange
+
+# ⚠️ D-050：会**命令真车运动**的入口，自己执行那道前置闸门 + 全程观察。
+#    "先跑一下 `vendor_cmd_channel_check.py`"是一条**注释** —— 而注释拦不住任何人。
+import vendor_channels as vc
 
 SET_MOTOR = '/ros_robot_controller/set_motor'
 IMU = '/ros_robot_controller/imu_raw'
@@ -646,10 +653,20 @@ def main():
     ap.add_argument('--dry-classify', action='store_true',
                     help='只量摆位并分类就退出 —— 不发任何运动指令。'
                          '不需要 Motor Driver，也不需要人看护（要车已摆好、LiDAR Driver 在跑）')
+    vc.add_arguments(ap)
     args = ap.parse_args()
+
+    # ⚠️ D-050 的前置闸门：**起飞前**就不干净 ⇒ 拒测（还没开始动，最安全的地方）。
+    #    自检模式（--vendor-watch-topics）也在这里结束，**绝不**进入运动流程。
+    #    ⚠️ `--dry-classify`（只量摆位）也走这道闸：它虽然不动车，但"车正在被
+    #       别人开着"同样会让它量到的距离失去意义。
+    _rc = vc.install(args)
+    if _rc is not None:
+        return _rc
 
     rclpy.init()
     node = SafetyChainTester()
+    vc.attach(node)         # 全程观察：结束时报"期间有没有第二个司机"
     results = []
 
     def rep(name, passed, detail):
@@ -693,7 +710,7 @@ def main():
             print('     （`direction` 不要求四轮离地 —— 它把"该被拦住"那一步放在位移之前；'
                   '但【3】会真的把车开出去 0.3 m，那一侧要留够空。）')
             print()
-            return 0
+            return vc.finalize(0)
         finally:
             node.destroy_node()
             if rclpy.ok():
@@ -734,7 +751,7 @@ def main():
         print('     两者都不是"走到位了"的证据 —— 位移精度仍需地面实测。')
         print('=' * 74)
         print()
-        return 0 if not failed else 1
+        return vc.finalize(0 if not failed else 1)
     finally:
         try:
             node.fire(node.ctrl_stop)

@@ -6,6 +6,12 @@ Phase 0 底盘运动验收脚本（bench acceptance harness，非运行时组件
 用途：在【人工在场 + 人工看护】条件下，验证底盘运动链路与安全边界，
 并把结果填进 `docs/PROJECT_STATUS.md` §7 接口清单。
 
+⚠️ **前提：本项目是唯一在发指令的人**（**D-050**）—— 厂商 app 生态走另一条 Twist
+   入口 `/controller/cmd_vel`，绕开本项目全部四道防线。本脚本正文里早就写了这件事，
+   但**从来没有人检查过它们此刻在不在发**。
+   ✅ **这道前提现在由本脚本自己执行**：起飞前有闸门（不干净 ⇒ 拒测），
+   全程另有并发观察（期间出现过非零 ⇒ **结论作废**、退出码 3）。见 `vendor_channels`。
+
 定位说明（重要）：
   本脚本是**验收工装**，不是机器人的控制路径。按 D-002 / D-016，运行时只有
   Control Skill 允许发布 `/cmd_vel`，且必须经 Safety Gateway。本脚本仅用于
@@ -44,6 +50,11 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from ros_robot_controller_msgs.msg import MotorsState
 from sensor_msgs.msg import Imu
+
+# ⚠️ D-050：会**命令真车运动**的入口，自己执行那道前置闸门 + 全程观察。
+#    本文件早先的注释里已经写明"`/controller/cmd_vel` 无任何限幅、5 个厂商 app 挂在其上"
+#    —— 但从没有人检查过它们**此刻在不在发**。注释拦不住任何人。
+import vendor_channels as vc
 
 HARD_MAX_VX = 0.15      # m/s   —— 脚本层硬限速（厂商层为 0.2）
 HARD_MAX_WZ = 0.40      # rad/s —— 脚本层硬限速（厂商层为 0.5）
@@ -212,13 +223,21 @@ def main():
     ap.add_argument('--skip-clamp', action='store_true')
     ap.add_argument('--skip-timeout', action='store_true')
     ap.add_argument('--precheck-only', action='store_true')
+    vc.add_arguments(ap)
     args = ap.parse_args()
     if not args.yes:
         print('拒绝运行：必须显式传入 --yes 确认有人看护。')
         return 2
 
+    # ⚠️ D-050 的前置闸门：**起飞前**就不干净 ⇒ 拒测（还没开始动，最安全的地方）。
+    #    自检模式（--vendor-watch-topics）也在这里结束，**绝不**进入运动流程。
+    _rc = vc.install(args)
+    if _rc is not None:
+        return _rc
+
     rclpy.init()
     node = ChassisTester()
+    vc.attach(node)         # 全程观察：结束时报"期间有没有第二个司机"
 
     def _sig(signum, frame):
         _stop_now.set()
@@ -308,7 +327,7 @@ def main():
             pass
 
     print(f'\n总耗时 {time.time() - t0:.1f}s，共 {n} 步')
-    return 0
+    return vc.finalize(0)
 
 
 if __name__ == '__main__':
